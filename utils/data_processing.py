@@ -291,11 +291,14 @@ def get_Temporal_data_TPPR_Node_Justification(dataset_name, snapshot: int, dynam
       train_data_edge_learn = Data(full_data.sources[train_feature_should_be_seen], full_data.destinations[train_feature_should_be_seen], \
       full_data.timestamps[train_feature_should_be_seen], full_data.edge_idxs[train_feature_should_be_seen], t_labels, hash_table=hash_table, node_feat=full_data.node_feat)
       
-      nn_val_data = Data(full_data.sources[nn_val_mask], full_data.destinations[nn_val_mask], full_data.timestamps[nn_val_mask],\
-                        full_data.edge_idxs[nn_val_mask], t_labels, hash_table = hash_table, node_feat=full_data.node_feat)
-      nn_val_node_original = np.array(sorted(set(full_data.sources[nn_val_mask]) | set(full_data.destinations[nn_val_mask])))
-      nn_val_node = np.vectorize(nn_val_data.hash_table.get)(nn_val_node_original)
-      nn_val_data.setup_robustness((nn_val_node, t_labels[nn_val_node]))
+      if nn_val_mask.sum() == 0:
+        nn_val_data = copy.deepcopy(val_data)
+      else:
+        nn_val_data = Data(full_data.sources[nn_val_mask], full_data.destinations[nn_val_mask], full_data.timestamps[nn_val_mask],\
+                          full_data.edge_idxs[nn_val_mask], t_labels, hash_table = hash_table, node_feat=full_data.node_feat)
+        nn_val_node_original = np.array(sorted(set(full_data.sources[nn_val_mask]) | set(full_data.destinations[nn_val_mask])))
+        nn_val_node = np.vectorize(nn_val_data.hash_table.get)(nn_val_node_original)
+        nn_val_data.setup_robustness((nn_val_node, t_labels[nn_val_node]))
       
       if task in ["imbalance", "fsl"]:
         if task == "imbalance":

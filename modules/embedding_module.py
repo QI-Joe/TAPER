@@ -299,8 +299,10 @@ class GraphDiffusionEmbedding(GraphEmbedding):
       # lap_weights_sum = torch.from_numpy(np.sum(lap_weights, axis=1)).float().to(self.device)
 
       # normalize the weights here, very important step!
+      # TODO: Add nosie for different weight, for lower weight, add more noise; for higher weight, add less noise
+      # be aware to refer to the paper with simlar task.
       weights=selected_weight_list[index]
-      # weights = torch.cos(weights) * torch.cos(lap_weights) + torch.sin(weights) * torch.cos(lap_weights)
+      weights = torch.cos(weights) * torch.cos(lap_weights) + torch.sin(weights) * torch.sin(lap_weights)
       weights_sum=torch.sum(weights,dim=1)
       weights=weights/weights_sum.unsqueeze(1)
       weights[weights_sum==0]=0
@@ -554,14 +556,32 @@ def get_embedding_module(module_type, node_features, edge_features, memory, neig
 
 
 
+def add_adaptive_noise(weights, noise_scale=0.1, epsilon=1e-8):
+    """
+    Add adaptive noise to a weight matrix.
 
+    Args:
+        weights (np.ndarray): shape (n, k), weight matrix with values >= 0 (or normalized).
+        noise_scale (float): base scale for noise magnitude.
+        epsilon (float): small constant to avoid division by zero.
 
+    Returns:
+        np.ndarray: noisy weight matrix of same shape.
+    """
+    # Normalize weights if not already (optional, depends on your data)
+    w_min, w_max = weights.min(), weights.max()
+    weights_norm = (weights - w_min) / (w_max - w_min + epsilon)
 
+    # Compute noise scale inversely proportional to weight magnitude
+    # noise_level = noise_scale * (1 - normalized_weight)
+    noise_level = noise_scale * (1.0 - weights_norm)
 
+    # Generate noise from normal distribution scaled by noise_level
+    noise = np.random.randn(*weights.shape) * noise_level
 
+    # Add noise to original weights
+    noisy_weights = weights + noise
 
-
-
-
+    return noisy_weights
 
 

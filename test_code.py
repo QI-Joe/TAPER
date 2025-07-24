@@ -140,10 +140,9 @@ def test_get_data_TPPR():
         evaluation_simluate_test(val_data)
         evaluation_simluate_test(test_data)
 
-
 if __name__ == "__main__":
     dataset = "tax51"
-    snapshot = 8
+    snapshot = 13
     task, ratio = "None", 1.5
     datalist: Optional[list[list[Data]]|None] = None
     BATCH_SIZE = 20_000
@@ -168,7 +167,7 @@ if __name__ == "__main__":
         
         train_node, train_label = train_data.robustness_match_tuple
         val_node, val_label = val_data.robustness_match_tuple
-        nn_val_node, nn_val_label = val_data.robustness_match_tuple
+        nn_val_node, nn_val_label = nn_val_data.robustness_match_tuple
         test_node, test_label = test_data.robustness_match_tuple
         nn_test_node, nn_test_label = nn_test_data.robustness_match_tuple
         num_instance = train_data.sources.shape[0]

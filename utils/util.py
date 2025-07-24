@@ -385,10 +385,10 @@ spec_tppr_finder = [
     ('val_norm_list', types.ListType(types.Array(types.float64, 1, 'C'))),
     ('val_PPR_list', nb.typeof(list_list_dict)),
 ]
+# source_nodes, timestamps, edge_idxs
 
 
-
-# @jitclass(spec_tppr_finder)
+@jitclass(spec_tppr_finder)
 class tppr_finder:
   def __init__(self,num_nodes,k,n_tppr,alpha_list,beta_list):
     self.num_nodes=num_nodes
@@ -599,7 +599,7 @@ class tppr_finder:
                 edge_idx=edge_idxs[i]
                 pairs=[(source,target),(target,source)] if source!=target else [(source,target)]
                 
-                if not (i+1)%1000: print(f"node updated to {i+1} edges")
+                if not (i+1)%10_000: print(f"node updated to {i+1} edges")
                 ############# ! then update the PPR values here #############
                 for index,pair in enumerate(pairs):
                     s1=pair[0]

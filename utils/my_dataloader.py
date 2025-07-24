@@ -4,11 +4,9 @@ import torch
 import random
 import math
 from torch_geometric.data import Data
-import torch_geometric.utils as U
 import copy
 import os
-from torch_geometric.loader import NeighborLoader
-from typing import Any, Union, Optional
+from typing import Any, Union, Optional, Tuple
 from multipledispatch import dispatch
 import os.path as osp
 from torch_geometric.datasets import Planetoid, CitationFull, WikiCS, Coauthor, Amazon
@@ -23,7 +21,7 @@ import enum
 MOOC, Mooc_extra = "Temporal_Dataset/act-mooc/act-mooc/", ["mooc_action_features", "mooc_action_labels", "mooc_actions"]
 MATHOVERFLOW, MathOverflow_extra = "Temporal_Dataset/mathoverflow/", ["sx-mathoverflow-a2q", "sx-mathoverflow-c2a", "sx-mathoverflow-c2q", "sx-mathoverflow"]
 OVERFLOW = r"../TestProejct/Temporal_Dataset/"
-STATIC = ["mathoverflow", "dblp", "askubuntu", "stackoverflow"]
+STATIC = ["mathoverflow", "dblp", "askubuntu", "stackoverflow", "mooc"]
 DYNAMIC = ["mathoverflow", "askubuntu", "stackoverflow"]
 TGB = ["tgbn-trade", "tgbn-genre", "tgbn-reddit", "tgbn-token"]
 LARGE_SCALE = ["tmall", "tax51"]
@@ -49,6 +47,8 @@ class NodeIdxMatching(object):
         else:
             if not isinstance(nodes, (np.ndarray, list, torch.Tensor)): 
                 nodes = list(nodes)
+            if len(label) > len(nodes):
+                label = np.arange(len(nodes))
             self.nodes = self.to_numpy(nodes)
             self.node: pd.DataFrame = pd.DataFrame({"node": nodes, "label": label}).reset_index()
 
@@ -409,49 +409,6 @@ class Temporal_Splitting(object):
             my_list.append(self.get_map(value))
         return self.combination[tuple(my_list)]
 
-    def dynamic_label(self, filelist: pd.DataFrame):
-        """
-        function realted to this function
-        :func1: label_match -- Generate a dictionary that stores all possible combination of labels, usually is 6 
-        e.g.(1,3), (2,3), (1,2,3)
-        :func2: self.get_map -- given a set, get corresponding int
-        :func3: self.set_map -- set the mapping dictinoary for combinations
-        :func4: self.dict_transpose -- given a tuple of set, return the corresponding label
-
-        :Class Laebl: enumerate class to match the set and integer
-
-        :param1: self.combination
-        :param2: set_mapping -- delay initialized, a little intricate, remember to check the initialization logic
-        """
-
-        temp_list = []
-        for i in range(3):
-            mask = filelist["appearance"] == (i+1)
-            set_nodes = set(filelist[mask][["src", "dst"]].stack().unique())
-            temp_list.append(set_nodes)
-        
-        c1, c2, c3 = temp_list
-        self.set_map(c1, c2, c3)
-        # store the dynamic label
-        unique_nodes = c1|c2|c3
-        # do we need sort here?
-        match_list = np.zeros((len(unique_nodes), ), dtype = np.int32)
-        match_list = np.sort(list(unique_nodes))
-        length = 3
-        labels = np.zeros(len(c1 | c2 | c3), dtype=np.int8)
-
-        nebular = [c1, c2, c3]
-        for ci in range(length):
-            combins = itertools.combinations(nebular, ci+1)
-            for item in combins: # combins output ((combin1,...), (combin2,...), (...) )
-                initial = item[0]
-                for i in range(1, len(item)):
-                    initial = initial & item[i]
-                values = self.dict_transpose(item)
-                mask = np.isin(match_list, list(initial))
-                labels[mask] = values
-        return labels
-
     def temporal_splitting(self, snapshot, **kwargs) -> list[Data]:
         """
         currently only suitable for CLDG dataset, to present flexibilty of function Data\n
@@ -587,6 +544,36 @@ def load_static_overflow(prefix: str, path: str=None, *wargs) -> tuple[Data, Nod
     label = pd.read_csv(os.path.join(path, "node2label.txt"), sep=' ', names=['node', 'label'])
     return edges, label
 
+def load_mooc(path:str=None) -> Tuple[pd.DataFrame]:
+    feat = pd.read_csv(os.path.join(path, "mooc_action_features.tsv"), sep = '\t')
+    general = pd.read_csv(os.path.join(path, "mooc_actions.tsv"), sep = '\t')
+    edge_label = pd.read_csv(os.path.join(path, "mooc_action_labels.tsv"), sep = '\t')
+    return general, feat, edge_label
+
+def edge_load_mooc(dataset:str):
+    auto_path = r"../Standard_Dataset/lp/act-mooc/act-mooc"
+    edge, feat, label = load_mooc(auto_path)
+    # for edge, its column idx is listed as ["ACTIONID", "USERID", "TARGETID", "TIMESTAMP"]
+    edge = edge.values
+    edge_idx, src2dst, timestamp = edge[:, 0], edge[:, 1:3].T, edge[:, 3]
+    
+    print(src2dst.dtype, src2dst.shape)
+    src2dst = src2dst.astype(np.int64)
+    
+    edge_pos = feat.iloc[:, 1:].values
+    y = label.iloc[:, 1].values
+    
+    node = np.unique(src2dst).astype(np.int64)
+    max_node = int(np.max(node)) + 1
+    if dataset == "mooc":
+        node = np.unique(src2dst[0])
+    node_pos = position_encoding(max_node, 64)# .numpy()
+    # edge_pos = time_encoding(timestamp)
+    
+    # pos = (node_pos, edge_pos)
+    graph = Data(x = node, edge_index=src2dst, edge_attr=timestamp, y = y, pos = node_pos)
+    return graph
+
 def load_dynamic_overflow(prefix: str, path: str=None, *wargs) -> tuple[pd.DataFrame, dict]:
     dataset = prefix
     path = OVERFLOW + prefix + r"/dynamic"
@@ -664,6 +651,8 @@ def load_static_dataset(path: str = None, dataset: str = "mathoverflow", fea_dim
         edges, label = load_static_overflow(dataset) if not path else load_static_overflow(dataset, path)
     elif dataset == "dblp":
         edges, label = load_dblp_interact() if not path else load_dblp_interact(path)
+    elif dataset == "mooc":
+        return edge_load_mooc(dataset), None
 
     x = label.node.to_numpy()
     nodes = position_encoding(x.max()+1, fea_dim)[x]
@@ -765,7 +754,7 @@ def data_load(dataset: str, **wargs) -> tuple[Temporal_Dataloader, Union[NodeIdx
         graph.pos = graph.x
         graph.x = np.array(nodes)
         graph.edge_index = graph.edge_index.numpy()
-        graph.edge_attr = np.arange(graph.x.shape[0])
+        graph.edge_attr = np.arange(graph.edge_index.shape[1])
         graph.y = graph.y.numpy()
         idxloader = NodeIdxMatching(False, nodes=nodes, label=graph.y)
     elif dataset in LARGE_SCALE:
