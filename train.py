@@ -62,6 +62,9 @@ parser.add_argument('--task', type=str, default="None", help='robustness task') 
 parser.add_argument('--ratio', type=float, default=50, help='imbalance, few shot learning and edge distrubution ratio')
 parser.add_argument('--cora_inductive', type=str2bool, default=False, help='whether to use inductive training')
 
+# Temporal kernel parameters for TDSL-TPPR factorized fusion
+parser.add_argument('--time_rff_dim', type=int, default=16, help='Number of random frequencies for Bochner temporal kernel')
+parser.add_argument('--time_rff_sigma', type=float, default=1.0, help='Bandwidth parameter for temporal kernel')
 
 parser.add_argument('--ignore_edge_feats', action='store_true')
 parser.add_argument('--ignore_node_feats', action='store_true')

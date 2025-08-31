@@ -7,6 +7,7 @@ import time
 from model.temporal_attention import TemporalAttentionLayer
 from numba import njit
 import copy
+from utils.kernel_utils import kernel_fuse
 
 
 @njit
@@ -117,8 +118,18 @@ class GraphDiffusionEmbedding(GraphEmbedding):
     self.k=args.topk
     self.tppr_strategy=self.args.tppr_strategy
     self.width=args.n_degree
+    
+    # Fusion mode for TDSL-TPPR combination
+    self.fusion_mode = getattr(args, 'fusion_mode', 'product')
     self.depth=args.n_layer
     assert(self.k!=0)
+    
+    # Temporal kernel (Bochner/RFF) for K_time computation
+    self.time_rff_dim = getattr(args, 'time_rff_dim', 16)  # number of random frequencies
+    self.time_rff_sigma = getattr(args, 'time_rff_sigma', 1.0)  # bandwidth parameter
+    # Fixed random frequencies for temporal kernel - registered as buffer to move with device
+    omega = torch.randn(self.time_rff_dim, device=self.device) * self.time_rff_sigma
+    self.register_buffer('time_rff_omega', omega)
 
     if self.tppr_strategy=='streaming':
       insert_node = self.num_nodes
@@ -257,7 +268,7 @@ class GraphDiffusionEmbedding(GraphEmbedding):
     if train:
       memory_nodes=np.hstack(selected_node_list)
       index = numba_unique(memory_nodes)
-      memory,_=memory_updater.get_updated_memory(memory,index) 
+      memory,_=memory_updater.get_updated_memory(memory,index)  
 
     self.average_topk=np.mean(np.sum(selected_weight_list[0],axis=1))
     selected_laplcian_memory = list()
@@ -302,10 +313,24 @@ class GraphDiffusionEmbedding(GraphEmbedding):
       # TODO: Add nosie for different weight, for lower weight, add more noise; for higher weight, add less noise
       # be aware to refer to the paper with simlar task.
       weights=selected_weight_list[index]
-      weights = torch.cos(weights) * torch.cos(lap_weights) + torch.sin(weights) * torch.sin(lap_weights)
-      weights_sum=torch.sum(weights,dim=1)
-      weights=weights/weights_sum.unsqueeze(1)
-      weights[weights_sum==0]=0
+      
+      # Use proper kernel fusion instead of cosine trick
+      # This implements the theoretical joint kernel: w_ij = π^TPPR_ij × h^TDSL_ij
+      if self.fusion_mode == "product":
+          weights = weights * lap_weights
+      elif self.fusion_mode == "sum":
+          weights = weights + lap_weights
+      elif self.fusion_mode == "cosine":
+          # Legacy cosine fusion for ablation
+          weights = torch.cos(weights) * torch.cos(lap_weights) + torch.sin(weights) * torch.sin(lap_weights)
+      else:
+          # Default to product
+          weights = weights * lap_weights
+      
+      # Normalize weights
+      weights_sum = torch.sum(weights, dim=1)
+      weights = weights / weights_sum.unsqueeze(1)
+      weights[weights_sum == 0] = 0
       
       
 
@@ -553,35 +578,5 @@ def get_embedding_module(module_type, node_features, edge_features, memory, neig
   else:
     raise ValueError("Embedding Module {} not supported".format(module_type))
 
-
-
-
-def add_adaptive_noise(weights, noise_scale=0.1, epsilon=1e-8):
-    """
-    Add adaptive noise to a weight matrix.
-
-    Args:
-        weights (np.ndarray): shape (n, k), weight matrix with values >= 0 (or normalized).
-        noise_scale (float): base scale for noise magnitude.
-        epsilon (float): small constant to avoid division by zero.
-
-    Returns:
-        np.ndarray: noisy weight matrix of same shape.
-    """
-    # Normalize weights if not already (optional, depends on your data)
-    w_min, w_max = weights.min(), weights.max()
-    weights_norm = (weights - w_min) / (w_max - w_min + epsilon)
-
-    # Compute noise scale inversely proportional to weight magnitude
-    # noise_level = noise_scale * (1 - normalized_weight)
-    noise_level = noise_scale * (1.0 - weights_norm)
-
-    # Generate noise from normal distribution scaled by noise_level
-    noise = np.random.randn(*weights.shape) * noise_level
-
-    # Add noise to original weights
-    noisy_weights = weights + noise
-
-    return noisy_weights
 
 
