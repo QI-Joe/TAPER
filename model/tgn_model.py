@@ -14,8 +14,8 @@ import copy
 from torch import Tensor
 
 class TGN(torch.nn.Module):
-  def __init__(self, neighbor_finder, node_features, edge_features, device, n_layers=2,
-               n_heads=2, dropout=0.1, use_memory=False,
+  def __init__(self, neighbor_finder, node_features, edge_features, device, kernel_fusion,
+               n_layers=2, n_heads=2, dropout=0.1, use_memory=False,
                node_dimension =100, time_dimension =100,
                memory_dimension=100, embedding_module_type="graph_attention",
                message_function="mlp", n_neighbors=None, aggregator_type="last",
@@ -86,6 +86,7 @@ class TGN(torch.nn.Module):
     self.embedding_module_type = embedding_module_type
     self.embedding_module = get_embedding_module(module_type=embedding_module_type,
                                                  node_features=None,
+                                                 kernel_fusion=kernel_fusion,
                                                  edge_features=self.edge_raw_features,
                                                  memory=self.memory, 
                                                  neighbor_finder=self.neighbor_finder,
@@ -124,7 +125,7 @@ class TGN(torch.nn.Module):
     self.embedding_module.t_tppr=0
 
   def insert_laplacian_memory(self, laplacian_bank: EfficentMemory):
-    self.laplacian_memory = laplacian_bank
+    self.laplacian_memory: EfficentMemory = laplacian_bank
 
   def compute_temporal_embeddings(self, source_nodes, destination_nodes, negative_nodes, edge_times,edge_idxs, n_neighbors, train):
 
@@ -196,9 +197,9 @@ class TGN(torch.nn.Module):
         self.test_mode=True
       memory = self.memory.memory
 
-    
-    node_embedding = self.embedding_module.compute_embedding_tppr_node(memory=memory, source_nodes=positives, timestamps=edge_times, \
-                                          memory_updater = self.memory_updater, train=train, lap_memory = self.laplacian_memory)
+
+    node_embedding = self.embedding_module.compute_embedding_tppr_node(memory=memory, source_nodes=positives, timestamps=edge_times,
+                        memory_updater=self.memory_updater, train=train, lap_memory=self.laplacian_memory)
 
     self.update_memory(self.memory, unique_positives) 
     self.memory.clear_messages(unique_positives)

@@ -7,7 +7,8 @@ import time
 from model.temporal_attention import TemporalAttentionLayer
 from numba import njit
 import copy
-from utils.kernel_utils import kernel_fuse
+from utils.kernel_utils import KernelFusion
+from modules.memory import EfficentMemory
 
 
 @njit
@@ -76,11 +77,13 @@ class GraphEmbedding(EmbeddingModule):
 
 
 class GraphDiffusionEmbedding(GraphEmbedding):
-  def __init__(self, node_features, edge_features, memory, neighbor_finder, time_encoder, n_layers,n_node_features, n_edge_features, n_time_features, embedding_dimension, device,n_heads=2, dropout=0.1, use_memory=True,args=None, num_nodes = -1):
+  def __init__(self, node_features, edge_features, memory, neighbor_finder, time_encoder, n_layers,n_node_features, \
+    n_edge_features, n_time_features, embedding_dimension, device, kernel_fusion: KernelFusion, \
+    n_heads=2, dropout=0.1, use_memory=True,args=None, num_nodes = -1):
     super(GraphDiffusionEmbedding, self).__init__(node_features, edge_features, memory,
                                             neighbor_finder, time_encoder, n_layers,
                                             n_node_features, n_edge_features,
-                                            n_time_features,
+                                            n_time_features, 
                                             embedding_dimension, device,
                                             n_heads, dropout,
                                             use_memory,args,num_nodes)
@@ -124,12 +127,7 @@ class GraphDiffusionEmbedding(GraphEmbedding):
     self.depth=args.n_layer
     assert(self.k!=0)
     
-    # Temporal kernel (Bochner/RFF) for K_time computation
-    self.time_rff_dim = getattr(args, 'time_rff_dim', 16)  # number of random frequencies
-    self.time_rff_sigma = getattr(args, 'time_rff_sigma', 1.0)  # bandwidth parameter
-    # Fixed random frequencies for temporal kernel - registered as buffer to move with device
-    omega = torch.randn(self.time_rff_dim, device=self.device) * self.time_rff_sigma
-    self.register_buffer('time_rff_omega', omega)
+    self.kernel_fusion: KernelFusion = kernel_fusion
 
     if self.tppr_strategy=='streaming':
       insert_node = self.num_nodes
@@ -168,9 +166,8 @@ class GraphDiffusionEmbedding(GraphEmbedding):
     """
     to align with processing in node classification, here the negative sampling part will be suspend
     """
-    node_len = len(source_node)
 
-    # TODO: A method to keep every nodes last timestamp 
+    # A method to keep every nodes last timestamp 
     timetable = self.node_last_timestamp(source_node, copy.deepcopy(timestamps))
     sorted_timetable = dict(sorted(timetable.items()))
     node_timestamp = np.array(list(sorted_timetable.values()))
@@ -253,14 +250,14 @@ class GraphDiffusionEmbedding(GraphEmbedding):
 
     return embeddings
 
-  def compute_embedding_tppr_node(self, memory, source_nodes, timestamps, memory_updater, train, lap_memory):
+  def compute_embedding_tppr_node(self, memory, source_nodes, timestamps, memory_updater, train, lap_memory: EfficentMemory):
     """
     The difference is, source_nodes here is entire node list instead of edges, be aware that edge_idxs may 
     not be used
     """
     source_nodes=np.array(source_nodes, dtype=np.int32)
     t=time.time()
-    (selected_node_list, selected_edge_idxs_list, selected_delta_time_list, selected_weight_list), sample_node = \
+    (selected_node_list, selected_edge_idxs_list, selected_delta_time_list, selected_weight_list, selected_decay_list), sample_node = \
       self.streaming_topk_extraction(source_nodes, timestamps)  
          
     self.t_tppr+=time.time()-t
@@ -280,6 +277,7 @@ class GraphDiffusionEmbedding(GraphEmbedding):
       selected_edge_idxs_list[i] = torch.from_numpy(selected_edge_idxs_list[i]).long().to(self.device,non_blocking=True)
       selected_delta_time_list[i] = torch.from_numpy(selected_delta_time_list[i]).float().to(self.device,non_blocking=True)
       selected_weight_list[i] = torch.from_numpy(selected_weight_list[i]).float().to(self.device,non_blocking=True)
+      selected_decay_list[i] = torch.from_numpy(selected_decay_list[i]).float().to(self.device,non_blocking=True)
 
     ### transform source embeddings
     nodes_0 = np.array(sample_node)
@@ -307,33 +305,24 @@ class GraphDiffusionEmbedding(GraphEmbedding):
       neighbor_embeddings=self.transform(neighbor_embeddings) # [600, X]
 
       lap_weights = torch.from_numpy(selected_laplcian_memory[index]).float().to(self.device,non_blocking=True)
+      temporal_decay_lap_weights = selected_decay_list[index] * lap_weights
       # lap_weights_sum = torch.from_numpy(np.sum(lap_weights, axis=1)).float().to(self.device)
 
       # normalize the weights here, very important step!
       # TODO: Add nosie for different weight, for lower weight, add more noise; for higher weight, add less noise
+      # Update: TODO mission has been done by adding temporal Spectral Laplacian
       # be aware to refer to the paper with simlar task.
       weights=selected_weight_list[index]
       
       # Use proper kernel fusion instead of cosine trick
       # This implements the theoretical joint kernel: w_ij = π^TPPR_ij × h^TDSL_ij
-      if self.fusion_mode == "product":
-          weights = weights * lap_weights
-      elif self.fusion_mode == "sum":
-          weights = weights + lap_weights
-      elif self.fusion_mode == "cosine":
-          # Legacy cosine fusion for ablation
-          weights = torch.cos(weights) * torch.cos(lap_weights) + torch.sin(weights) * torch.sin(lap_weights)
-      else:
-          # Default to product
-          weights = weights * lap_weights
+      weights = self.kernel_fusion.kernel_fuse(weights, temporal_decay_lap_weights, self.fusion_mode, combine_mode='non')
       
       # Normalize weights
       weights_sum = torch.sum(weights, dim=1)
       weights = weights / weights_sum.unsqueeze(1)
       weights[weights_sum == 0] = 0
       
-      
-
       ### concat source embeddings, and neighbor embeddings obtained by different diffusion models
       neighbor_embeddings=neighbor_embeddings*weights[:,:,None]
       neighbor_embeddings=torch.sum(neighbor_embeddings,dim=1)
@@ -495,7 +484,7 @@ class IdentityEmbedding(EmbeddingModule):
 
 def get_embedding_module(module_type, node_features, edge_features, memory, neighbor_finder,
                          time_encoder, n_layers, n_node_features, n_edge_features, n_time_features,
-                         embedding_dimension, device,
+                         embedding_dimension, device, kernel_fusion: KernelFusion,
                          n_heads=2, dropout=0.1, n_neighbors=None,
                          use_memory=True,args=None, num_nodes = -1):
 
@@ -541,7 +530,7 @@ def get_embedding_module(module_type, node_features, edge_features, memory, neig
                               n_edge_features=n_edge_features,
                               n_time_features=n_time_features,
                               embedding_dimension=embedding_dimension,
-                              device=device,
+                              device=device, kernel_fusion=kernel_fusion,
                               n_heads=n_heads, dropout=dropout, use_memory=use_memory,
                               args=args,num_nodes=num_nodes)
 

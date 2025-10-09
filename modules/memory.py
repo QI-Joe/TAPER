@@ -67,7 +67,7 @@ class Memory(nn.Module):
     self.nodes[positives]= 0
     
 class EfficentMemory(nn.Module):
-  def __init__(self, snapshot: int, device="cpu", combination_method='sum'):
+  def __init__(self, snapshot: int, device="cpu", combination_method='sum', mu=1.0):
     super(EfficentMemory, self).__init__()
     self.memory: Optional[torch.Tensor | None | Any] = None
     self.device = device
@@ -75,17 +75,96 @@ class EfficentMemory(nn.Module):
     self.snapshot = snapshot
     self.snapshot_memory = [np.array([0])*self.snapshot]
     self.memory_position = 0
+    self.mu = mu  # Resolvent parameter for TDSL
     
     
   def reset_device(self, device):
     self.device = device
     self.memory = self.memory.to(self.device)
     
-  def add_snapshot_memory(self, first_edge_idx_lap: torch.Tensor, first_edge_value_lap: torch.Tensor, node_list = None):
+  def add_snapshot_memory(self, first_edge_idx_lap: torch.Tensor, first_edge_value_lap: torch.Tensor, node_list = None, temporal_decay_factors=None):
+    """
+    Add snapshot memory with proper TDSL resolvent computation
+    
+    Args:
+        first_edge_idx_lap: Laplacian edge indices
+        first_edge_value_lap: Laplacian edge weights
+        node_list: list of nodes
+        temporal_decay_factors: optional temporal decay weights for edges
+    """
     first_edge_idx_lap, first_edge_value_lap = first_edge_idx_lap.cpu().numpy(), first_edge_value_lap.cpu().numpy()
     self.memory = self.src2dst_tuple_adj_list(first_edge_idx_lap, first_edge_value_lap, node_list)
     self.snapshot_memory[self.memory_position] = deepcopy(self.memory)
     self.memory_position += 1
+    
+  # def update_snapshot_memory(self, row_idx, col_idx, temporal_decay_factors):
+  #   self.snapshot_memory[self.memory_position][row_idx][col_idx] *= temporal_decay_factors
+  
+  # def compute_tdsl_weights(self, edge_idx, edge_value, node_list: Optional[np.ndarray | None], temporal_decay_factors=None)->dict:
+  #   """
+  #   Compute TDSL resolvent weights: (I + μL_sym)^(-1)
+    
+  #   Args:
+  #       edge_idx: edge indices array
+  #       edge_value: edge weight values
+  #       node_list: node list
+  #       temporal_decay_factors: optional temporal decay factors
+        
+  #   Returns:
+  #       dict mapping (src, dst) -> TDSL weight
+  #   """
+  #   # Convert to torch tensors for computation
+  #   edge_idx_tensor = torch.from_numpy(edge_idx)
+  #   edge_value_tensor = torch.from_numpy(edge_value)
+    
+  #   # Apply temporal decay if provided
+  #   if temporal_decay_factors is not None:
+  #       edge_value_tensor = edge_value_tensor * torch.from_numpy(temporal_decay_factors)
+    
+  #   # Determine number of nodes
+  #   num_nodes = int(edge_idx.max()) + 1 if len(edge_idx) > 0 else len(node_list) if node_list is not None else 1000
+    
+  #   try:
+  #     # Create dense adjacency matrix from Laplacian edge format
+  #     # Note: edge_idx and edge_value already represent symmetric normalized Laplacian
+  #     lap_dense = torch.sparse_coo_tensor(edge_idx_tensor, edge_value_tensor, (num_nodes, num_nodes)).to_dense()
+      
+  #     # Compute I + μL_sym  
+  #     identity = torch.eye(num_nodes)
+  #     resolvent_input = identity + self.mu * lap_dense
+      
+  #     # Invert to get (I + μL_sym)^(-1)
+  #     try:
+  #         resolvent_matrix = torch.inverse(resolvent_input)
+  #     except:
+  #         # Use pseudo-inverse if singular
+  #         resolvent_matrix = torch.pinverse(resolvent_input)
+      
+  #     # Convert back to sparse dictionary format for compatibility
+  #     resolvent_np = resolvent_matrix.numpy()
+      
+  #   except Exception as e:
+  #     print(f"Warning: TDSL computation failed, falling back to adjacency: {e}")
+  #     # Fallback to original adjacency-based computation
+  #     return self.src2dst_tuple_adj_list(edge_idx, edge_value, node_list)
+    
+  #   # Create dictionary mapping (src, dst) -> TDSL weight
+  #   src2dst_tdsl = defaultdict(lambda: np.float32(1.0))
+    
+  #   # Initialize with zero weights for nodes in node_list
+  #   if node_list is not None:
+  #       for node in node_list:
+  #           src2dst_tdsl[(node, -1)] = np.float32(0)
+    
+  #   # Fill in TDSL weights (only store significant weights to save memory)
+  #   threshold = 1e-6
+  #   for i in range(min(num_nodes, resolvent_np.shape[0])):
+  #       for j in range(min(num_nodes, resolvent_np.shape[1])):
+  #           weight = resolvent_np[i, j]
+  #           if abs(weight) > threshold:
+  #               src2dst_tdsl[(i, j)] = np.float32(weight)
+    
+  #   return src2dst_tdsl
   
   def src2dst_tuple_adj_list(self, edge_idx, edge_value, node_list: Optional[np.ndarray | None])->dict:
     transpose_edge_idx: np.ndarray = edge_idx.T

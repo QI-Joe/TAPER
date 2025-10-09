@@ -9,6 +9,8 @@ import numpy as np
 from pathlib import Path
 from evaluation.evaluation import LogRegression, fast_eval_check
 from model.tgn_model import TGN
+from utils.kernel_utils import KernelFusion
+from model.kernels.joint_kernel import TDSLTPPRJointKernel
 from utils.util import EarlyStopMonitor, RandEdgeSampler, get_neighbor_finder
 from utils.data_processing import get_data_TPPR, get_Temporal_data_TPPR_Node_Justification
 from sklearn.metrics import precision_score, roc_auc_score, accuracy_score
@@ -31,7 +33,7 @@ def str2bool(order: str)->bool:
   return False
 
 parser = argparse.ArgumentParser('Self-supervised training with diffusion models')
-parser.add_argument('-d', '--data', type=str, help='Dataset name (eg. wikipedia or reddit)',default='cora')
+parser.add_argument('-d', '--data', type=str, help='Dataset name (eg. wikipedia or reddit)',default='dblp')
 parser.add_argument('--bs', type=int, default=10000, help='Batch_size')
 parser.add_argument('--n_degree', type=int, default=10, help='Number of neighbors to sample')
 parser.add_argument('--n_head', type=int, default=7, help='Number of heads used in attention layer')
@@ -39,7 +41,7 @@ parser.add_argument('--n_epoch', type=int, default=100, help='Number of epochs')
 parser.add_argument('--n_layer', type=int, default=2, help='Number of network layers')
 parser.add_argument('--lr', type=float, default=1e-2, help='Learning rate')
 parser.add_argument('--patience', type=int, default=5, help='Patience for early stopping')
-parser.add_argument('--snapshot', type=int, default=3, help='Number of runs')
+parser.add_argument('--snapshot', type=int, default=10, help='Number of runs')
 parser.add_argument('--drop_out', type=float, default=0.3, help='Dropout probability')
 parser.add_argument('--gpu', type=int, default=0, help='Idx for the gpu to use')
 parser.add_argument('--use_memory', default=True, type=bool, help='Whether to augment the model with a node memory')
@@ -65,6 +67,11 @@ parser.add_argument('--cora_inductive', type=str2bool, default=False, help='whet
 # Temporal kernel parameters for TDSL-TPPR factorized fusion
 parser.add_argument('--time_rff_dim', type=int, default=16, help='Number of random frequencies for Bochner temporal kernel')
 parser.add_argument('--time_rff_sigma', type=float, default=1.0, help='Bandwidth parameter for temporal kernel')
+
+# Graph kernel parameters for TDSL-TPPR joint kernel
+parser.add_argument('--graph_mu', type=float, default=1.0, help='Diffusion parameter for TDSL graph kernel')
+parser.add_argument('--max_nodes', type=int, default=10000, help='Maximum number of nodes for graph kernel')
+parser.add_argument('--fusion_mode', type=str, default='product', choices=['product', 'cosine', 'harmonic', 'geometric', 'fusion'], help='Kernel fusion strategy')
 
 parser.add_argument('--ignore_edge_feats', action='store_true')
 parser.add_argument('--ignore_node_feats', action='store_true')
@@ -130,7 +137,16 @@ for i in range(1):
   train_ngh_finder = get_neighbor_finder(train_learn)
   val_tppr_backup, test_tppr_backup = float(0), float(0)
 
+  # Initialize kernel fusion with joint kernel parameters
+  kernel_fusion = KernelFusion(
+    fuse_mode=args.fusion_mode,
+    time_rff_dim=args.time_rff_dim,
+    time_sigma=args.time_rff_sigma, 
+    device=device
+  )
+
   tgn = TGN(neighbor_finder=train_ngh_finder, node_features=node_feats, edge_features=edge_feats, device=device,
+            kernel_fusion=kernel_fusion,
             n_layers=NUM_LAYER,n_heads=NUM_HEADS, dropout=DROP_OUT, use_memory=USE_MEMORY,
             node_dimension = NODE_DIM, time_dimension = TIME_DIM, memory_dimension=NODE_DIM,
             embedding_module_type=args.embedding_module, 

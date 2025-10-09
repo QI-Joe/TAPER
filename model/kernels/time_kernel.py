@@ -26,18 +26,24 @@ class BochnerTimeKernel(nn.Module):
         
     def compute_time_features(self, timestamps):
         """
-        Compute random Fourier features φ_time(t) for given timestamps
+        Enhanced to compute random Fourier features φ_time(t) for arbitrary input shapes
         
         Args:
-            timestamps: tensor of shape (n,) containing timestamps
+            timestamps: tensor of any shape (...,) containing timestamps
+                       e.g., (n,) for traditional usage or (n, k) for neighbor timestamps
             
         Returns:
-            time_features: tensor of shape (n, 2*rff_dim) containing RFF features
+            time_features: tensor of shape (..., 2*rff_dim) containing RFF features
         """
-        timestamps = timestamps.to(self.device).float()
+        # Store original shape for reshaping output
+        original_shape = timestamps.shape
+        timestamps = timestamps.to(self.omega.device).float()
+        
+        # Flatten timestamps for batch RFF computation
+        t_flat = timestamps.reshape(-1)  # [total_elements]
         
         # Compute ω * t for all frequencies and timestamps
-        omega_t = torch.outer(timestamps, self.omega)  # (n, rff_dim)
+        omega_t = torch.outer(t_flat, self.omega)  # (total_elements, rff_dim)
         
         # Compute cos and sin features
         cos_features = torch.cos(omega_t)
@@ -47,26 +53,31 @@ class BochnerTimeKernel(nn.Module):
         time_features = torch.cat([cos_features, sin_features], dim=1)
         time_features = time_features * math.sqrt(2.0 / self.rff_dim)
         
-        return time_features
+        # Reshape back to original shape + feature dimension
+        return time_features.reshape(*original_shape, -1)
     
-    def compute_kernel_matrix(self, timestamps1, timestamps2=None):
+    def compute_neighbor_time_features(self, timestamp_matrix, normalize_per_sample=True):
         """
-        Compute temporal kernel matrix K_time(t_i, t_j)
+        Compute time features for (n, k) neighbor timestamp matrix
         
         Args:
-            timestamps1: tensor of shape (n1,)
-            timestamps2: tensor of shape (n2,) or None (defaults to timestamps1)
+            timestamp_matrix: tensor of shape (n, k) where n=samples, k=neighbors
+            normalize_per_sample: if True, apply softmax normalization per sample
             
         Returns:
-            kernel_matrix: tensor of shape (n1, n2)
+            Phi: tensor of shape (n, k, 2*rff_dim) - raw time features for each neighbor
         """
-        if timestamps2 is None:
-            timestamps2 = timestamps1
-            
-        phi_t1 = self.compute_time_features(timestamps1)
-        phi_t2 = self.compute_time_features(timestamps2)
+        n, k = timestamp_matrix.shape
         
-        return torch.mm(phi_t1, phi_t2.t())
+        # Compute RFF features for all timestamps
+        Phi = self.compute_time_features(timestamp_matrix)  # [n, k, 2*rff_dim]
+        
+        if normalize_per_sample:
+            # Apply softmax normalization across neighbors (dim=1) for each feature
+            # This helps with numerical stability and emphasizes relative differences
+            Phi = torch.softmax(Phi, dim=1)
+        
+        return Phi
     
     def forward(self, timestamps):
         """Forward pass returns time features"""
@@ -85,11 +96,17 @@ class AdaptiveTimeKernel(BochnerTimeKernel):
         self.log_sigma = nn.Parameter(torch.log(torch.tensor(initial_sigma)))
         
     def compute_time_features(self, timestamps):
-        timestamps = timestamps.to(self.device).float()
+        """Enhanced adaptive version with learnable sigma"""
+        # Store original shape for reshaping output
+        original_shape = timestamps.shape
+        timestamps = timestamps.to(self.omega.device).float()
         
         # Use learnable sigma
         sigma = torch.exp(self.log_sigma)
-        omega_t = torch.outer(timestamps, self.omega * sigma)
+        
+        # Flatten timestamps for batch computation
+        t_flat = timestamps.reshape(-1)
+        omega_t = torch.outer(t_flat, self.omega * sigma)
         
         cos_features = torch.cos(omega_t)
         sin_features = torch.sin(omega_t)
@@ -97,4 +114,5 @@ class AdaptiveTimeKernel(BochnerTimeKernel):
         time_features = torch.cat([cos_features, sin_features], dim=1)
         time_features = time_features * math.sqrt(2.0 / self.rff_dim)
         
-        return time_features
+        # Reshape back to original shape + feature dimension
+        return time_features.reshape(*original_shape, -1)
