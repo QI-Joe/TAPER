@@ -761,6 +761,7 @@ def data_load(dataset: str, **wargs) -> tuple[Temporal_Dataloader, Union[NodeIdx
         return load_padded_dataset(dataset=dataset, **wargs)
     else:
         raise ValueError("Dataset not found")
+    
     task: Optional[str|None] = wargs["rb_task"]
     if task != None: task = task.lower()
     if task == "edge_disturb":

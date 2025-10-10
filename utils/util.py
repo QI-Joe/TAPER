@@ -42,30 +42,6 @@ class MLP(torch.nn.Module):
     return self.fc_3(x).squeeze(dim=1)
 
 
-class EarlyStopMonitor(object):
-  def __init__(self, max_round=3, higher_better=True, tolerance=1e-10):
-    self.max_round = max_round
-    self.num_round = 0
-    self.epoch_count = 0
-    self.best_epoch = 0
-    self.last_best = None
-    self.higher_better = higher_better
-    self.tolerance = tolerance
-
-  def early_stop_check(self, curr_val):
-    if not self.higher_better:
-      curr_val *= -1
-    if self.last_best is None:
-      self.last_best = curr_val
-    elif (curr_val - self.last_best) / np.abs(self.last_best) > self.tolerance:
-      self.last_best = curr_val
-      self.num_round = 0
-      self.best_epoch = self.epoch_count
-    else:
-      self.num_round += 1
-    self.epoch_count += 1
-    return self.num_round >= self.max_round
-
 class RandEdgeSampler(object):
   def __init__(self, src_list, dst_list, seed=None):
     self.seed = None
@@ -137,6 +113,12 @@ list_dict=typed.List()
 list_dict.append(nb_tppr_dict)
 list_list_dict=typed.List()
 list_list_dict.append(list_dict)
+
+# Create similar structure for beta_dict
+list_beta_dict=typed.List()
+list_beta_dict.append(nb_beta_dict)
+list_list_beta_dict=typed.List()
+list_list_beta_dict.append(list_beta_dict)
 
 
 unique=TRUE
@@ -387,15 +369,15 @@ spec_tppr_finder = [
     ('beta_list', types.List(types.float64)),
     ('norm_list', types.ListType(types.Array(types.float64, 1, 'C'))),
     ('PPR_list', nb.typeof(list_list_dict)),
-    ('decay_dict', nb.typeof(nb_beta_dict)),
+    ('decay_dict', nb.typeof(list_list_beta_dict)),
     ('val_norm_list', types.ListType(types.Array(types.float64, 1, 'C'))),
     ('val_PPR_list', nb.typeof(list_list_dict)),
-    ('val_decay_dict', nb.typeof(nb_beta_dict)),
+    ('val_decay_dict', nb.typeof(list_list_beta_dict)),
 ]
 # source_nodes, timestamps, edge_idxs
 
 
-# @jitclass(spec_tppr_finder)
+@jitclass(spec_tppr_finder)
 class tppr_finder:
   def __init__(self,num_nodes,k,n_tppr,alpha_list,beta_list):
     self.num_nodes=num_nodes

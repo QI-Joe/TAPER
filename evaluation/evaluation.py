@@ -290,4 +290,22 @@ def fast_eval_check(src_combination, data: Data, emb, prj_model):
     #     nn_val_acc, nn_val_prec, nn_val_recall, nn_val_f1 = full_evaluation_method(nn_val_allow2see, nn_val_label_allow2see)
     #     val_dict = {**val_dict, **{"nn_val_acc": nn_val_acc, "nn_val_prec": nn_val_prec, "nn_val_recall": nn_val_recall, "nn_val_f1": nn_val_f1}}
     return val_dict
+
+
+def eval_check(src_combination, data: Data, emb, prj_model):
+    prj_model.eval()
+    with torch.no_grad():
+        output = prj_model(emb)
         
+    val_sample_node = np.array(list(set(src_combination)))
+    
+    y_true = data.labels[val_sample_node]
+    y_hat = output.argmax(-1).cpu().numpy()
+
+    node_allow2see_mask = (y_true != -1) # add here due to test data will have -1 label
+    val_allow2see, val_label_allow2see = y_hat[node_allow2see_mask], y_true[node_allow2see_mask]
+    
+    val_acc, val_prec, val_recall, val_f1 = full_evaluation_method(val_allow2see, val_label_allow2see)
+    val_dict = {"val_acc": val_acc, "val_prec": val_prec, "val_recall": val_recall, "val_f1": val_f1}
+
+    return val_dict

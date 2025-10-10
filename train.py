@@ -7,15 +7,14 @@ import argparse
 import torch
 import numpy as np
 from pathlib import Path
-from evaluation.evaluation import LogRegression, fast_eval_check
+from evaluation.evaluation import LogRegression, fast_eval_check, eval_check
 from model.tgn_model import TGN
 from utils.kernel_utils import KernelFusion
-from model.kernels.joint_kernel import TDSLTPPRJointKernel
-from utils.util import EarlyStopMonitor, RandEdgeSampler, get_neighbor_finder
-from utils.data_processing import get_data_TPPR, get_Temporal_data_TPPR_Node_Justification
+from utils.util import RandEdgeSampler, get_neighbor_finder
+from utils.monitor_component import EarlyStopMonitor
+from utils.data_processing import get_data_TPPR, get_Temporal_data_TPPR_Node_Justification, get_simplified_temporal_data
 from sklearn.metrics import precision_score, roc_auc_score, accuracy_score
 from numba.core.errors import NumbaDeprecationWarning, NumbaPendingDeprecationWarning, NumbaTypeSafetyWarning
-from utils.my_dataloader import to_cuda, Temporal_Splitting, Temporal_Dataloader, data_load
 from itertools import chain
 from modules.memory import EfficentMemory
 from torch_geometric.data import Data as pygData
@@ -37,7 +36,7 @@ parser.add_argument('-d', '--data', type=str, help='Dataset name (eg. wikipedia 
 parser.add_argument('--bs', type=int, default=10000, help='Batch_size')
 parser.add_argument('--n_degree', type=int, default=10, help='Number of neighbors to sample')
 parser.add_argument('--n_head', type=int, default=7, help='Number of heads used in attention layer')
-parser.add_argument('--n_epoch', type=int, default=100, help='Number of epochs')
+parser.add_argument('--n_epoch', type=int, default=300, help='Number of epochs')
 parser.add_argument('--n_layer', type=int, default=2, help='Number of network layers')
 parser.add_argument('--lr', type=float, default=1e-2, help='Learning rate')
 parser.add_argument('--patience', type=int, default=5, help='Patience for early stopping')
@@ -71,7 +70,7 @@ parser.add_argument('--time_rff_sigma', type=float, default=1.0, help='Bandwidth
 # Graph kernel parameters for TDSL-TPPR joint kernel
 parser.add_argument('--graph_mu', type=float, default=1.0, help='Diffusion parameter for TDSL graph kernel')
 parser.add_argument('--max_nodes', type=int, default=10000, help='Maximum number of nodes for graph kernel')
-parser.add_argument('--fusion_mode', type=str, default='product', choices=['product', 'cosine', 'harmonic', 'geometric', 'fusion'], help='Kernel fusion strategy')
+parser.add_argument('--fusion_mode', type=str, default='cosine', choices=['product', 'cosine', 'harmonic', 'geometric', 'fusion'], help='Kernel fusion strategy')
 
 parser.add_argument('--ignore_edge_feats', action='store_true')
 parser.add_argument('--ignore_node_feats', action='store_true')
@@ -104,7 +103,7 @@ RATIO = int(args.ratio) if args.ratio>10 else args.ratio
 SNAPSHOT = args.snapshot
 
 
-round_list, graph_num, graph_feature, edge_num = get_Temporal_data_TPPR_Node_Justification(DATA, snapshot=SNAPSHOT, dynamic=dynamic, task=ROBUST_TASK, ratio=RATIO)
+round_list, graph_num, graph_feature, edge_num = get_simplified_temporal_data(DATA, snapshot=SNAPSHOT, dynamic=dynamic, task=ROBUST_TASK, ratio=RATIO)
 
 device_string = 'cuda:{}'.format(GPU) if torch.cuda.is_available() else 'cpu'
 device = torch.device(device_string)
@@ -116,6 +115,7 @@ laplacian_memory = EfficentMemory(snapshot=SNAPSHOT, device=device, combination_
 all_run_times = time.time()
 VIEW = len(round_list)
 model = "Zebra-Lap"
+early_stopper = EarlyStopMonitor(max_round=args.patience, dataset=DATA, snapshot=SNAPSHOT, higher_better=True)
 print(f"Given task is {ROBUST_TASK}")
 for i in range(1):
 
@@ -164,15 +164,11 @@ for i in range(1):
   criterion_node = torch.nn.CrossEntropyLoss(reduction="mean")
   optimizer = torch.optim.Adam(chain(tgn.parameters(), projector.parameters()), lr=LEARNING_RATE)
   tgn = tgn.to(device)
-  early_stopper = EarlyStopMonitor(max_round=args.patience)
   t_total_epoch_train=0
   t_total_epoch_val=0
   t_total_epoch_test=0
   t_total_tppr=0
   stop_epoch=-1
-  best_test_acc = 0.0
-  patience_counter = 0
-  patience_limit = 5
 
   embedding_module = tgn.embedding_module
 
@@ -231,14 +227,16 @@ for i in range(1):
       node_emb = projector.forward(node_emb)
     
       sample_node = np.array(list(set(batch_train)))
-      sample_node = vector_map(sample_node)
       
-      train_match_list, train_tranucated_label = train_data.robustness_match_tuple
-      node_allow2see_mask = np.isin(sample_node, train_match_list) & (train_data.labels[sample_node] != -1)
+      # sample_node = vector_map(sample_node)
+      # train_match_list, train_tranucated_label = train_data.robustness_match_tuple
+      # node_allow2see_mask = np.isin(sample_node, train_match_list) & (train_data.labels[sample_node] != -1)
       # node_allow2see_mask = np.ones_like(sample_node, dtype=bool)
       
-      labels = train_data.labels[sample_node][node_allow2see_mask]
-      labels_on_GPU = torch.tensor(labels).type(torch.LongTensor).to(device) # for label matching, it may need 2 mask...
+      labels = train_data.labels[sample_node] # [node_allow2see_mask]
+      labels_on_GPU = labels.type(torch.LongTensor).to(device) # for label matching, it may need 2 mask...
+      
+      node_allow2see_mask = labels_on_GPU != torch.tensor(-1).to(device)
       loss = criterion_node(node_emb[node_allow2see_mask], labels_on_GPU) # node_emb
 
       loss.backward()
@@ -286,7 +284,7 @@ for i in range(1):
     with torch.no_grad():
       val_emb = tgn.compute_temporal_node_embeddings(sources=val_source, edge_times=val_timestamps, train=False)
     
-    val_check = fast_eval_check(val_source, val_data, val_emb, prj_model = projector)
+    val_check = eval_check(val_source, val_data, val_emb, prj_model = projector)
     
     val_tppr_backup = embedding_module.backup_tppr()
     tgn.memory.restore_memory(train_memory_backup)
@@ -297,7 +295,7 @@ for i in range(1):
       nn_val_timestamps = np.concatenate([nn_val_data.timestamps, nn_val_data.timestamps])
       embedding_module.streaming_topk_node(source_nodes=nn_val_source, timestamps=nn_val_timestamps, edge_idxs=nn_val_data.edge_idxs)
       nn_val_emb = tgn.compute_temporal_node_embeddings(sources = nn_val_source, edge_times = nn_val_timestamps, train=False)
-    nn_val_check = fast_eval_check(nn_val_source, nn_val_data, nn_val_emb, prj_model = projector)
+    nn_val_check = eval_check(nn_val_source, nn_val_data, nn_val_emb, prj_model = projector)
     
     tgn.memory.restore_memory(train_memory_backup)
     if args.tppr_strategy=='streaming':
@@ -327,7 +325,7 @@ for i in range(1):
     with torch.no_grad():
       test_emb = tgn.compute_temporal_node_embeddings(sources=test_source, edge_times=test_timestamps, train=False)
     
-    test_check = fast_eval_check(test_source, test_data, test_emb, prj_model = projector)
+    test_check = eval_check(test_source, test_data, test_emb, prj_model = projector)
     # store the test_tppr and save update cost
     test_tppr_backup = embedding_module.backup_tppr()
     """
@@ -346,7 +344,7 @@ for i in range(1):
       embedding_module.streaming_topk_node(source_nodes=nn_test_source, timestamps=nn_test_timestamps, edge_idxs=nn_test_data.edge_idxs)
       nn_test_emb = tgn.compute_temporal_node_embeddings(sources = nn_test_source, edge_times = nn_test_timestamps, train=False)
     
-    nn_test_check = fast_eval_check(nn_test_source, nn_test_data, nn_test_emb, prj_model = projector)
+    nn_test_check = eval_check(nn_test_source, nn_test_data, nn_test_emb, prj_model = projector)
     
     tgn.memory.restore_memory(train_memory_backup)
     if args.tppr_strategy=='streaming':
@@ -359,16 +357,6 @@ for i in range(1):
     NUM_EPOCH=stop_epoch if stop_epoch!=-1 else NUM_EPOCH
 
     current_test_acc = test_check["val_acc"]  # Assuming this is the correct key for test accuracy
-    if current_test_acc > best_test_acc:
-        best_test_acc = current_test_acc
-        patience_counter = 0  # Reset counter if we have a new best
-    else:
-        patience_counter += 1  # Increment counter if no improvement
-
-    # Check for early stopping
-    if patience_counter >= patience_limit:
-        print(f'Early stopping triggered after {patience_limit} epochs without improvement.')
-        break
 
     simple_key = "val"
     for name, data in zip(["val", "nn_val", "test", "nn_test"], [val_check, nn_val_check, test_check, nn_test_check]):
@@ -390,9 +378,20 @@ for i in range(1):
     for key, value in test_check.items():
       merged_test_check[key] = value
     for key, value in nn_test_check.items():
-      if key.startswith("val_"): new_key = "nn_test_" + key[4:]
+      if key.startswith("val_"): 
+        new_key = "nn_test_" + key[4:]
+        merged_test_check[new_key] = value
+      else:
+        new_key = "nn_test_" + key
+        merged_test_check[new_key] = value
 
     snapshot_list.append((merged_val_check, merged_test_check))
+    
+    # Check for early stopping
+    if early_stopper.early_stop_check(current_test_acc, tgn, i):
+      patience_limit = early_stopper.max_round
+      print(f'Early stopping triggered after {patience_limit} epochs without improvement.')
+      break
 
   # Compute mean values for each metric in val_check and test_check across all snapshots
   mean_val_metrics = {}
@@ -420,28 +419,31 @@ for i in range(1):
 
   test_record.append((mean_val_metrics, mean_test_metrics))
 
-times = time.time()
-formatted_time = datetime.fromtimestamp(times).strftime('%m_%d_%H_%M')
-file_name = f"{model}_{DATA}_Snapshot: {SNAPSHOT}_{ROBUST_TASK}_{RATIO}_{formatted_time}"
-save_dir = os.path.join("log", DATA, formatted_time[3:5], ROBUST_TASK)
-os.makedirs(save_dir, exist_ok=True)
+early_stopper.data_store(test_record)
+early_stopper.store_args(args)
 
-with open(rf"{save_dir}/{file_name}.txt", "w") as file:
-  for idx, recs in enumerate(test_record):
-    val, tests = recs
-    print(f"At snapshot {idx}, we get:")
-    file.write(f"At snapshot {idx}, we get:\n")
+# times = time.time()
+# formatted_time = datetime.fromtimestamp(times).strftime('%m_%d_%H_%M')
+# file_name = f"{model}_{DATA}_Snapshot: {SNAPSHOT}_{ROBUST_TASK}_{RATIO}_{formatted_time}"
+# save_dir = os.path.join("log", DATA, formatted_time[3:5], ROBUST_TASK)
+# os.makedirs(save_dir, exist_ok=True)
+
+# with open(rf"{save_dir}/{file_name}.txt", "w") as file:
+#   for idx, recs in enumerate(test_record):
+#     val, tests = recs
+#     print(f"At snapshot {idx}, we get:")
+#     file.write(f"At snapshot {idx}, we get:\n")
     
-    for metric, value in val.items():
-      print(f"avg {metric}: {value}")
-      file.write(f"avg {metric}: {value}\n")
+#     for metric, value in val.items():
+#       print(f"avg {metric}: {value}")
+#       file.write(f"avg {metric}: {value}\n")
     
-    print("\n")
-    file.write("\n")
+#     print("\n")
+#     file.write("\n")
     
-    for metric, value in tests.items():
-      print(f"test {metric}: {value}")
-      file.write(f"test {metric}: {value}\n")
+#     for metric, value in tests.items():
+#       print(f"test {metric}: {value}")
+#       file.write(f"test {metric}: {value}\n")
     
-    print("\n")
-    file.write("\n")
+#     print("\n")
+#     file.write("\n")

@@ -62,12 +62,12 @@ class KernelFusion(TDSLTPPRJointKernel):
         elif self.fuse_mode == "geometric":
             # Geometric mean 
             fused = torch.sqrt(tppr_weights * tdsl_weights + eps)
+        
+        else:
+            raise ValueError(f"Unknown fusion mode: {self.fuse_mode}")
             
         if combine_mode == "full":
             fused = self.compute_joint_features(timestamp, fused)
-            
-        else:
-            raise ValueError(f"Unknown fusion mode: {self.fuse_mode}")
         
         # Row-wise normalization to maintain stochastic property
         # row_sums = fused.sum(dim=1, keepdim=True)

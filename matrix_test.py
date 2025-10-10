@@ -4,7 +4,7 @@ import numpy as np
 from pathlib import Path
 from model.tgn_model import TGN
 from utils.util import get_neighbor_finder
-from utils.data_processing import get_data_TPPR, get_Temporal_data_TPPR_Node_Justification
+from utils.data_processing import get_data_TPPR, get_Temporal_data_TPPR_Node_Justification, get_data
 from numba.core.errors import NumbaDeprecationWarning, NumbaPendingDeprecationWarning, NumbaTypeSafetyWarning
 import numpy as np
 import pandas as pd
@@ -184,62 +184,68 @@ def compute_ppr_torch(num_nodes, edge_index, alpha=0.15, num_iters=20, device='c
 
     return P
 
-for i in range(1):
-    full_data, train_data, val_data, test_data, train_learn, nn_val_data, nn_test_data, n_nodes, n_edges = round_list[i]
+if __name__ == "__main__":
+    get_data("dblp")
+
+    matrix_test = False
+    if matrix_test:
+        for i in range(1):
+            full_data, train_data, val_data, test_data, train_learn, nn_val_data, nn_test_data, n_nodes, n_edges = round_list[i]
+            
+            args.n_nodes = graph_num +1
+            args.n_edges = edge_num +1
+            node_num = graph_num + 1
+            
+            edge_feats = None
+            node_feats = graph_feature
+            node_feat_dims = full_data.node_feat.shape[1]
+            print(f"Current snapshot full nodes size {full_data.n_unique_nodes}, test_data node size {test_data.n_unique_nodes}, total graph nodes {graph_num}")
+
+            if edge_feats is None or args.ignore_edge_feats: 
+                print('>>> Ignore edge features')
+                edge_feats = np.zeros((args.n_edges, 1))
+                edge_feat_dims = 1
+
+            train_ngh_finder = get_neighbor_finder(train_learn)
+            val_tppr_backup, test_tppr_backup = float(0), float(0)
+            def get_tppr_value():
+                tgn = TGN(neighbor_finder=train_ngh_finder, node_features=node_feats, edge_features=edge_feats, device=device,
+                            n_layers=NUM_LAYER,n_heads=NUM_HEADS, dropout=DROP_OUT, use_memory=USE_MEMORY,
+                            node_dimension = NODE_DIM, time_dimension = TIME_DIM, memory_dimension=NODE_DIM,
+                            embedding_module_type=args.embedding_module, 
+                            message_function=args.message_function, 
+                            aggregator_type=args.aggregator,
+                            memory_updater_type=args.memory_updater,
+                            n_neighbors=NUM_NEIGHBORS,
+                            use_destination_embedding_in_message=args.use_destination_embedding_in_message,
+                            use_source_embedding_in_message=args.use_source_embedding_in_message,
+                            args=args)
+            
+                train_src = np.concatenate([test_data.sources, test_data.destinations])
+                timestamps_train = np.concatenate([test_data.timestamps, test_data.timestamps])
+
+                tgn.embedding_module.streaming_topk_node(source_nodes=train_src, timestamps=timestamps_train, edge_idxs=test_data.edge_idxs)
+                ptr2tppr_dict = tgn.embedding_module.tppr_finder.PPR_list
+                np_adj = tppr_to_sparse_pandas(ptr2tppr_dict, graph_num+1)
+                return np_adj
+            edge_index = np.vstack((test_data.sources, test_data.destinations))
+            edge_index = torch.from_numpy(edge_index).long().to(device)
+            if args.matrix_value == "tppr":
+                np_adj = get_tppr_value()
+            elif args.matrix_value == "laplacian":
+                # Get the Laplacian matrix
+                np_index, np_value = get_laplacian(edge_index, normalization='sym', num_nodes=node_num, dtype=torch.float32)
+                np_adj = csr_matrix((np_value.cpu().numpy(), (np_index[0].cpu().numpy(), np_index[1].cpu().numpy())), shape=(node_num, node_num))
+                np_adj = np_adj.tocsr()
+            elif args.matrix_value == "ppr":
+                torch_adj = compute_ppr_torch(num_nodes = graph_num+1, edge_index = edge_index, alpha=0.1, num_iters=50, device=device)
+                np_adj = torch_sparse_to_scipy_csr(torch_adj)
+            # Ensure the output directory exists
+            output_dir = Path(f"data/matrix/{DATA}")
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Save the matrix with the appropriate name
+            output_path = output_dir / f"{args.matrix_value}_value_{VIEWS}_{i}.npz"
+            save_npz(output_path, np_adj, compressed=True)
+            print(f"Saved TPPR matrix to {output_path}")
     
-    args.n_nodes = graph_num +1
-    args.n_edges = edge_num +1
-    node_num = graph_num + 1
-    
-    edge_feats = None
-    node_feats = graph_feature
-    node_feat_dims = full_data.node_feat.shape[1]
-    print(f"Current snapshot full nodes size {full_data.n_unique_nodes}, test_data node size {test_data.n_unique_nodes}, total graph nodes {graph_num}")
-
-    if edge_feats is None or args.ignore_edge_feats: 
-        print('>>> Ignore edge features')
-        edge_feats = np.zeros((args.n_edges, 1))
-        edge_feat_dims = 1
-
-    train_ngh_finder = get_neighbor_finder(train_learn)
-    val_tppr_backup, test_tppr_backup = float(0), float(0)
-    def get_tppr_value():
-        tgn = TGN(neighbor_finder=train_ngh_finder, node_features=node_feats, edge_features=edge_feats, device=device,
-                    n_layers=NUM_LAYER,n_heads=NUM_HEADS, dropout=DROP_OUT, use_memory=USE_MEMORY,
-                    node_dimension = NODE_DIM, time_dimension = TIME_DIM, memory_dimension=NODE_DIM,
-                    embedding_module_type=args.embedding_module, 
-                    message_function=args.message_function, 
-                    aggregator_type=args.aggregator,
-                    memory_updater_type=args.memory_updater,
-                    n_neighbors=NUM_NEIGHBORS,
-                    use_destination_embedding_in_message=args.use_destination_embedding_in_message,
-                    use_source_embedding_in_message=args.use_source_embedding_in_message,
-                    args=args)
-    
-        train_src = np.concatenate([test_data.sources, test_data.destinations])
-        timestamps_train = np.concatenate([test_data.timestamps, test_data.timestamps])
-
-        tgn.embedding_module.streaming_topk_node(source_nodes=train_src, timestamps=timestamps_train, edge_idxs=test_data.edge_idxs)
-        ptr2tppr_dict = tgn.embedding_module.tppr_finder.PPR_list
-        np_adj = tppr_to_sparse_pandas(ptr2tppr_dict, graph_num+1)
-        return np_adj
-    edge_index = np.vstack((test_data.sources, test_data.destinations))
-    edge_index = torch.from_numpy(edge_index).long().to(device)
-    if args.matrix_value == "tppr":
-        np_adj = get_tppr_value()
-    elif args.matrix_value == "laplacian":
-        # Get the Laplacian matrix
-        np_index, np_value = get_laplacian(edge_index, normalization='sym', num_nodes=node_num, dtype=torch.float32)
-        np_adj = csr_matrix((np_value.cpu().numpy(), (np_index[0].cpu().numpy(), np_index[1].cpu().numpy())), shape=(node_num, node_num))
-        np_adj = np_adj.tocsr()
-    elif args.matrix_value == "ppr":
-        torch_adj = compute_ppr_torch(num_nodes = graph_num+1, edge_index = edge_index, alpha=0.1, num_iters=50, device=device)
-        np_adj = torch_sparse_to_scipy_csr(torch_adj)
-    # Ensure the output directory exists
-    output_dir = Path(f"data/matrix/{DATA}")
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save the matrix with the appropriate name
-    output_path = output_dir / f"{args.matrix_value}_value_{VIEWS}_{i}.npz"
-    save_npz(output_path, np_adj, compressed=True)
-    print(f"Saved TPPR matrix to {output_path}")

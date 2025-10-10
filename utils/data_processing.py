@@ -623,8 +623,205 @@ def load_feat(d):
     return node_feats, edge_feats
 
 
-############## load a batch of training data ##############
+def get_simplified_temporal_data(dataset_name, snapshot: int, dynamic: bool, task: str="None", ratio: float = 0.0):
+    """
+    Simplified function for inductive validation without robustness/edge_disturb/fsl settings
+    
+    Input:
+    - dataset_name: name of the dataset 
+    - snapshot: number of temporal snapshots
+    - dynamic: whether to use dynamic temporal splitting
+    
+    Output:
+    - TPPR_list: list of [full_data, train_data, val_data, test_data, node_num, edge_num] for each snapshot
+    - graph_num_node: max node number
+    - graph_feat: node features
+    - edge_number: total number of edges
+    """
+    # Load data without robustness settings
+    wargs = {"rb_task": task, "ratio": ratio}
+    graph, idx_list = data_load(dataset_name, **wargs)
+    
+    if snapshot <= 3:
+        # For small snapshots, treat as single graph
+        graph.edge_attr = np.arange(graph.edge_index.shape[1])
+        graph_list = [Temporal_Dataloader(nodes=graph.x, edge_index=graph.edge_index, 
+                                          edge_attr=graph.edge_attr, y=graph.y, pos=graph.pos)]
+    else:
+        # Use temporal splitting
+        graph_list = Temporal_Splitting(graph, dynamic=dynamic, idxloader=idx_list).temporal_splitting(snapshot=snapshot)
+    
+    graph_num_node = max(graph.x) if hasattr(graph, 'x') else len(graph.x)
+    graph_feat = copy.deepcopy(graph.pos)
+    edge_number = graph.edge_index.shape[1]
+    
+    TPPR_list, full_label = [], graph.y
+    length = len(graph_list) - 1 if len(graph_list) > 1 else 1
+    single_graph = length < 2
+    
+    for idx in range(length):
+        items = graph_list[idx]
+        temporal_node_num = items.x.shape[0]
+        
+        # Convert to Data object
+        full_data = to_TPPR_Data(items)
+        timestamp = full_data.timestamps
+        
+        # Node-based splitting following original pattern
+        all_nodes = items.my_n_id.node["index"].values
+        flipped_nodes = items.my_n_id.node["node"].values
+        
+        # Simple temporal split: 80% train, 20% val for current snapshot
+        train_node_boundary = int(temporal_node_num * 0.8)
+        train_nodes = all_nodes[:train_node_boundary]
+        train_nodes_original = flipped_nodes[:train_node_boundary]
+        val_nodes = all_nodes[train_node_boundary:]
+        val_nodes_original = flipped_nodes[train_node_boundary:]
+        
+        # Create edge masks based on node participation (transductive approach)
+        src_edge = items.edge_index[0, :]
+        dst_edge = items.edge_index[1, :]
+        
+        # Train mask: both src and dst in train nodes
+        train_src_mask = np.isin(src_edge, train_nodes_original)
+        train_dst_mask = np.isin(dst_edge, train_nodes_original)
+        train_mask = train_src_mask & train_dst_mask
+        
+        # Val mask: edges involving validation nodes (transductive: can see train nodes)
+        val_src_mask = np.isin(src_edge, val_nodes_original)
+        val_dst_mask = np.isin(dst_edge, val_nodes_original)
+        val_mask = val_src_mask | val_dst_mask  # Include edges with at least one val node
+        
+        # NN Val mask: both src and dst in validation nodes (for inductive evaluation)
+        nn_val_mask = val_src_mask & val_dst_mask
+        
+        # Create hash table for node mapping
+        hash_dataframe = copy.deepcopy(items.my_n_id.node.loc[:, ["index", "node"]].values.T)
+        hash_table = {node: idx for idx, node in zip(*hash_dataframe)}
+        
+        # Create train data
+        train_data = Data(
+            full_data.sources[train_mask], 
+            full_data.destinations[train_mask], 
+            full_data.timestamps[train_mask],
+            full_data.edge_idxs[train_mask], 
+            full_label, 
+            hash_table=hash_table, 
+            node_feat=full_data.node_feat
+        )
+        
+        # Create validation data (transductive: can see train nodes)
+        val_data = Data(
+            full_data.sources[val_mask], 
+            full_data.destinations[val_mask], 
+            full_data.timestamps[val_mask],
+            full_data.edge_idxs[val_mask], 
+            full_label, 
+            hash_table=hash_table, 
+            node_feat=full_data.node_feat
+        )
+        
+        # Create nn_val_data (inductive validation: only val-val edges)
+        if nn_val_mask.sum() == 0:
+            nn_val_data = copy.deepcopy(val_data)
+        else:
+            nn_val_data = Data(
+                full_data.sources[nn_val_mask],
+                full_data.destinations[nn_val_mask], 
+                full_data.timestamps[nn_val_mask],
+                full_data.edge_idxs[nn_val_mask],
+                full_label,
+                hash_table=hash_table,
+                node_feat=full_data.node_feat
+            )
+        
+        # Create test data
+        if single_graph:
+            # For single graph, use temporal splitting
+            train_mask_time, val_mask_time, test_mask_time = quantile_static(val=0.70, test=0.85, timestamps=timestamp)
+            test_data = Data(
+                full_data.sources[test_mask_time], 
+                full_data.destinations[test_mask_time], 
+                full_data.timestamps[test_mask_time],
+                full_data.edge_idxs[test_mask_time], 
+                full_label, 
+                hash_table=hash_table, 
+                node_feat=full_data.node_feat
+            )
+            # For single graph, nn_test is same as test
+            nn_test_data = copy.deepcopy(test_data)
+        else:
+            # Use next temporal graph as test
+            test_graph = graph_list[idx + 1]
+            test_data = to_TPPR_Data(test_graph)
+            test_data.labels = full_label  # Use full labels
+            
+            # Create nn_test_data: test nodes not seen in training (inductive testing)
+            test_nodes_original = np.array(sorted(set(test_graph.my_n_id.node["node"].values) - set(flipped_nodes)))
+            test_src_mask = np.isin(test_data.sources, test_nodes_original)
+            test_dst_mask = np.isin(test_data.destinations, test_nodes_original)
+            nn_test_mask = test_src_mask | test_dst_mask
+            
+            nn_test_data = Data(
+                test_data.sources[nn_test_mask],
+                test_data.destinations[nn_test_mask],
+                test_data.timestamps[nn_test_mask],
+                test_data.edge_idxs[nn_test_mask],
+                full_label,
+                hash_table=test_data.hash_table,
+                node_feat=test_data.node_feat
+            )
+        
+        node_num = items.num_nodes
+        node_edges = items.num_edges
+        
+        # Follow original pattern: [full_data, train_data, val_data, test_data, train_data_edge_learn, nn_val_data, nn_test_data, node_num, node_edges]
+        # For simplicity, we'll use train_data as train_data_edge_learn (can be refined if needed)
+        train_data_edge_learn = copy.deepcopy(train_data)
+        
+        TPPR_list.append([full_data, train_data, val_data, test_data, train_data_edge_learn, nn_val_data, nn_test_data, node_num, node_edges])
+    
+    return TPPR_list, graph_num_node, graph_feat, edge_number
+
+
 def get_data(dataset_name):
+  """
+  Simplified get_data function using the new simplified temporal data loading
+  for transductive validation/test with nn_validation and nn_test data
+  """
+  # Use the simplified temporal data function with single snapshot
+  TPPR_list, graph_num_node, graph_feat, edge_number = get_simplified_temporal_data(
+      dataset_name=dataset_name, 
+      snapshot=10,  # Single snapshot for simplicity
+      dynamic=False
+  )
+  
+  # Extract the data from the first (and only) snapshot
+  selected_index = [0, -1]
+  for idx in selected_index:
+      full_data, train_data, val_data, test_data, train_data_edge_learn, nn_val_data, nn_test_data, node_num, node_edges = TPPR_list[idx]
+
+      print("The dataset has {} interactions, involving {} different nodes".format(
+          full_data.n_interactions, full_data.n_unique_nodes))
+      print("The training dataset has {} interactions, involving {} different nodes".format(
+          train_data.n_interactions, train_data.n_unique_nodes))
+      print("The validation dataset has {} interactions, involving {} different nodes".format(
+          val_data.n_interactions, val_data.n_unique_nodes))
+      print("The test dataset has {} interactions, involving {} different nodes".format(
+          test_data.n_interactions, test_data.n_unique_nodes))
+      print("The nn validation dataset has {} interactions, involving {} different nodes".format(
+          nn_val_data.n_interactions, nn_val_data.n_unique_nodes))
+      print("The nn test dataset has {} interactions, involving {} different nodes".format(
+          nn_test_data.n_interactions, nn_test_data.n_unique_nodes))
+      print("-----"*20)
+      
+      
+
+
+def get_data_original(dataset_name):
+  """
+  Original get_data function - loads from CSV format with manual inductive validation setup
+  """
   graph_df = pd.read_csv('data/{}/ml_{}.csv'.format(dataset_name,dataset_name))
 
   #edge_features = np.load('../data/{}/ml_{}.npy'.format(dataset_name,dataset_name))
