@@ -292,14 +292,12 @@ def fast_eval_check(src_combination, data: Data, emb, prj_model):
     return val_dict
 
 
-def eval_check(src_combination, data: Data, emb, prj_model):
+def eval_check(emb: torch.Tensor, label: torch.Tensor, prj_model: torch.nn.Module):
     prj_model.eval()
     with torch.no_grad():
-        output = prj_model(emb)
-        
-    val_sample_node = np.array(list(set(src_combination)))
-    
-    y_true = data.labels[val_sample_node]
+        output: torch.Tensor = prj_model(emb)
+
+    y_true = label
     y_hat = output.argmax(-1).cpu().numpy()
 
     node_allow2see_mask = (y_true != -1) # add here due to test data will have -1 label

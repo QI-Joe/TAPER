@@ -158,3 +158,4 @@ saved_checkpoints/
 test_code.py
 
 *.md
+*.txt

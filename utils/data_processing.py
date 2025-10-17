@@ -760,7 +760,19 @@ def get_simplified_temporal_data(dataset_name, snapshot: int, dynamic: bool, tas
             test_nodes_original = np.array(sorted(set(test_graph.my_n_id.node["node"].values) - set(flipped_nodes)))
             test_src_mask = np.isin(test_data.sources, test_nodes_original)
             test_dst_mask = np.isin(test_data.destinations, test_nodes_original)
-            nn_test_mask = test_src_mask | test_dst_mask
+            
+            test_mask = test_src_mask | test_dst_mask
+            nn_test_mask = test_src_mask & test_dst_mask
+            
+            test_data = Data(
+                test_data.sources[test_mask],
+                test_data.destinations[test_mask],
+                test_data.timestamps[test_mask],
+                test_data.edge_idxs[test_mask],
+                full_label,
+                hash_table=test_data.hash_table,
+                node_feat=test_data.node_feat
+            )
             
             nn_test_data = Data(
                 test_data.sources[nn_test_mask],

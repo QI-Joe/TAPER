@@ -721,6 +721,7 @@ def load_padded_dataset(dataset: str = "tmall", fea_dim: int = 64, **wargs) -> t
     full_x = np.arange(min_node, max_node+1)
     full_labels = np.full_like(full_x, -1, dtype=int)
     full_labels[x] = consistent_labels
+    full_labels = torch.from_numpy(full_labels)
     
     node_feature = position_encoding(max_node+1, fea_dim)
 

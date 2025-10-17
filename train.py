@@ -12,7 +12,7 @@ from model.tgn_model import TGN
 from utils.kernel_utils import KernelFusion
 from utils.util import RandEdgeSampler, get_neighbor_finder
 from utils.monitor_component import EarlyStopMonitor
-from utils.data_processing import get_data_TPPR, get_Temporal_data_TPPR_Node_Justification, get_simplified_temporal_data
+from utils.data_processing import get_data_TPPR, get_Temporal_data_TPPR_Node_Justification, get_simplified_temporal_data, Data
 from sklearn.metrics import precision_score, roc_auc_score, accuracy_score
 from numba.core.errors import NumbaDeprecationWarning, NumbaPendingDeprecationWarning, NumbaTypeSafetyWarning
 from itertools import chain
@@ -34,7 +34,7 @@ def str2bool(order: str)->bool:
 parser = argparse.ArgumentParser('Self-supervised training with diffusion models')
 parser.add_argument('-d', '--data', type=str, help='Dataset name (eg. wikipedia or reddit)',default='dblp')
 parser.add_argument('--bs', type=int, default=10000, help='Batch_size')
-parser.add_argument('--n_degree', type=int, default=10, help='Number of neighbors to sample')
+parser.add_argument('--n_degree', type=int, default=8, help='Number of neighbors to sample')
 parser.add_argument('--n_head', type=int, default=7, help='Number of heads used in attention layer')
 parser.add_argument('--n_epoch', type=int, default=300, help='Number of epochs')
 parser.add_argument('--n_layer', type=int, default=2, help='Number of network layers')
@@ -71,6 +71,8 @@ parser.add_argument('--time_rff_sigma', type=float, default=1.0, help='Bandwidth
 parser.add_argument('--graph_mu', type=float, default=1.0, help='Diffusion parameter for TDSL graph kernel')
 parser.add_argument('--max_nodes', type=int, default=10000, help='Maximum number of nodes for graph kernel')
 parser.add_argument('--fusion_mode', type=str, default='cosine', choices=['product', 'cosine', 'harmonic', 'geometric', 'fusion'], help='Kernel fusion strategy')
+parser.add_argument('--combine', type=str, default="non", choices=['non', 'full'], help='Time-Series Merge')
+parser.add_argument('--ablation_tppr', type=bool, default=False, help="Ablation test on only tppr value")
 
 parser.add_argument('--ignore_edge_feats', action='store_true')
 parser.add_argument('--ignore_node_feats', action='store_true')
@@ -102,7 +104,6 @@ EPOCH_INTERVAL = 25
 RATIO = int(args.ratio) if args.ratio>10 else args.ratio
 SNAPSHOT = args.snapshot
 
-
 round_list, graph_num, graph_feature, edge_num = get_simplified_temporal_data(DATA, snapshot=SNAPSHOT, dynamic=dynamic, task=ROBUST_TASK, ratio=RATIO)
 
 device_string = 'cuda:{}'.format(GPU) if torch.cuda.is_available() else 'cpu'
@@ -110,6 +111,7 @@ device = torch.device(device_string)
 training_strategy = "node"
 NODE_DIM = round_list[0][0].node_feat.shape[1]
 test_record = []
+time_records = []  # timing records across snapshots
 laplacian_memory = EfficentMemory(snapshot=SNAPSHOT, device=device, combination_method='sum')
 
 all_run_times = time.time()
@@ -119,6 +121,11 @@ early_stopper = EarlyStopMonitor(max_round=args.patience, dataset=DATA, snapshot
 print(f"Given task is {ROBUST_TASK}")
 for i in range(1):
 
+  # Reset early stopping state for each snapshot
+  early_stopper.snapshot_memory_clean()
+  snapshot_start_time = time.time()
+  epoch_train_times = []  # per-epoch training time for this snapshot
+  
   full_data, train_data, val_data, test_data, train_learn, nn_val_data, nn_test_data, n_nodes, n_edges = round_list[i]
   num_classes = np.max(full_data.labels)+1
 
@@ -237,7 +244,7 @@ for i in range(1):
       labels_on_GPU = labels.type(torch.LongTensor).to(device) # for label matching, it may need 2 mask...
       
       node_allow2see_mask = labels_on_GPU != torch.tensor(-1).to(device)
-      loss = criterion_node(node_emb[node_allow2see_mask], labels_on_GPU) # node_emb
+      loss = criterion_node(node_emb[node_allow2see_mask], labels_on_GPU[node_allow2see_mask]) # node_emb
 
       loss.backward()
       optimizer.step()
@@ -246,23 +253,29 @@ for i in range(1):
 
       with torch.no_grad():
         node_pred = node_emb[node_allow2see_mask].argmax(-1).cpu().numpy()
+        labels_numpy=labels_on_GPU[node_allow2see_mask].cpu().numpy()
         train_loss.append(loss.item())
-        train_ap.append(precision_score(labels.reshape(-1,1), node_pred.reshape(-1,1), average="macro", zero_division=1.0))
-        train_acc.append(accuracy_score(labels.reshape(-1,1), node_pred.reshape(-1,1)))
+        train_ap.append(precision_score(labels_numpy.reshape(-1,1), node_pred.reshape(-1,1), average="macro", zero_division=1.0))
+        train_acc.append(accuracy_score(labels_numpy.reshape(-1,1), node_pred.reshape(-1,1)))
     print(f"(TPPR) | snapshot {i} epoch {epoch} train ACC {np.mean(train_acc):.5f}, train AP {np.mean(train_ap):.5f}, Loss: {np.mean(train_loss):.4f}")
 
-    if (epoch+1) % EPOCH_INTERVAL != 0: continue
+    # always record epoch training time, even if we skip eval this epoch
+    epoch_train_time = time.time() - t_epoch_train_start
+    t_total_epoch_train += epoch_train_time
+    epoch_train_times.append(epoch_train_time)
+
+    # aggregate train metrics
+    train_ap = np.mean(train_ap)
+    # train_auc=np.mean(train_auc)
+    train_acc = np.mean(train_acc)
+    train_loss = np.mean(train_loss)
+
+    if (epoch+1) % EPOCH_INTERVAL != 0:
+      continue
     tgn.eval()
     projector.eval()
     epoch_tppr_time = tgn.embedding_module.t_tppr
     train_tppr_time.append(epoch_tppr_time)
-
-    epoch_train_time = time.time() - t_epoch_train_start
-    t_total_epoch_train+=epoch_train_time
-    train_ap=np.mean(train_ap)
-    # train_auc=np.mean(train_auc)
-    train_acc=np.mean(train_acc)
-    train_loss=np.mean(train_loss)
 
     ########################  Model Validation on the Val Dataset #######################
     t_epoch_val_start=time.time()
@@ -281,10 +294,36 @@ for i in range(1):
     else:
       embedding_module.restore_tppr(val_tppr_backup)
 
+    def batch_train(datas: Data, batch_size: int):
+      num_instance = len(datas.sources)
+      num_batch = math.ceil(num_instance/batch_size)
+      emb, label = torch.tensor([]).to(device), torch.tensor([]).to(device)
+      
+      for batch in range(num_batch):
+        start, end = batch*batch_size, min((batch+1)*batch_size, num_instance)
+        batch_src = datas.sources[start: end]
+        batch_end = datas.destinations[start:end]
+        batch_time = datas.timestamps[start:end]
+
+        batch_train = np.concatenate([batch_src, batch_end])
+        batch_train_time = np.concatenate([batch_time, batch_time])
+
+        node_emb = tgn.compute_temporal_node_embeddings(sources=batch_train, edge_times=batch_train_time, train=True)
+        node_emb = projector.forward(node_emb)
+      
+        sample_node = np.array(list(set(batch_train)))
+        
+        labels = datas.labels[sample_node] # [node_allow2see_mask]
+        labels_on_GPU = labels.type(torch.LongTensor).to(device)
+        
+        emb = torch.cat([emb, node_emb], dim=0)
+        label = torch.cat([label, labels_on_GPU], dim=0)
+      return emb, label
+
     with torch.no_grad():
-      val_emb = tgn.compute_temporal_node_embeddings(sources=val_source, edge_times=val_timestamps, train=False)
+      val_emb, val_label = batch_train(val_data, batch_size=BATCH_SIZE)
     
-    val_check = eval_check(val_source, val_data, val_emb, prj_model = projector)
+    val_check = eval_check(val_emb, val_label, prj_model = projector)
     
     val_tppr_backup = embedding_module.backup_tppr()
     tgn.memory.restore_memory(train_memory_backup)
@@ -294,9 +333,9 @@ for i in range(1):
       nn_val_source = np.concatenate([nn_val_data.sources, nn_val_data.destinations])
       nn_val_timestamps = np.concatenate([nn_val_data.timestamps, nn_val_data.timestamps])
       embedding_module.streaming_topk_node(source_nodes=nn_val_source, timestamps=nn_val_timestamps, edge_idxs=nn_val_data.edge_idxs)
-      nn_val_emb = tgn.compute_temporal_node_embeddings(sources = nn_val_source, edge_times = nn_val_timestamps, train=False)
-    nn_val_check = eval_check(nn_val_source, nn_val_data, nn_val_emb, prj_model = projector)
-    
+      nn_val_emb, nn_val_label = batch_train(nn_val_data, batch_size=BATCH_SIZE)
+    nn_val_check = eval_check(nn_val_emb, nn_val_label, prj_model = projector)
+
     tgn.memory.restore_memory(train_memory_backup)
     if args.tppr_strategy=='streaming':
       tgn.embedding_module.restore_tppr(train_tppr_backup)
@@ -323,9 +362,9 @@ for i in range(1):
       embedding_module.restore_tppr(test_tppr_backup)
     
     with torch.no_grad():
-      test_emb = tgn.compute_temporal_node_embeddings(sources=test_source, edge_times=test_timestamps, train=False)
-    
-    test_check = eval_check(test_source, test_data, test_emb, prj_model = projector)
+      test_emb, test_label = batch_train(test_data, batch_size=BATCH_SIZE)
+
+    test_check = eval_check(test_emb, test_label, prj_model = projector)
     # store the test_tppr and save update cost
     test_tppr_backup = embedding_module.backup_tppr()
     """
@@ -342,10 +381,10 @@ for i in range(1):
       nn_test_source = np.concatenate([nn_test_data.sources, nn_test_data.destinations])
       nn_test_timestamps = np.concatenate([nn_test_data.timestamps, nn_test_data.timestamps])
       embedding_module.streaming_topk_node(source_nodes=nn_test_source, timestamps=nn_test_timestamps, edge_idxs=nn_test_data.edge_idxs)
-      nn_test_emb = tgn.compute_temporal_node_embeddings(sources = nn_test_source, edge_times = nn_test_timestamps, train=False)
-    
-    nn_test_check = eval_check(nn_test_source, nn_test_data, nn_test_emb, prj_model = projector)
-    
+      nn_test_emb, nn_test_label = batch_train(nn_test_data, batch_size=BATCH_SIZE)
+
+    nn_test_check = eval_check(nn_test_emb, nn_test_label, prj_model = projector)
+
     tgn.memory.restore_memory(train_memory_backup)
     if args.tppr_strategy=='streaming':
       tgn.embedding_module.restore_tppr(train_tppr_backup)
@@ -419,31 +458,17 @@ for i in range(1):
 
   test_record.append((mean_val_metrics, mean_test_metrics))
 
-early_stopper.data_store(test_record)
+  # snapshot timing
+  snapshot_total_time = time.time() - snapshot_start_time
+  time_records.append({
+    "snapshot": i,
+    "epoch_train_times": epoch_train_times,
+    "snapshot_total_time": snapshot_total_time
+  })
+
+hypers={"merge_mode": args.fusion_mode, "combine": args.combine, "ablation_tppr": args.ablation_tppr}
+
+
+early_stopper.data_store(test_record, hypers, time_records=time_records)
 early_stopper.store_args(args)
 
-# times = time.time()
-# formatted_time = datetime.fromtimestamp(times).strftime('%m_%d_%H_%M')
-# file_name = f"{model}_{DATA}_Snapshot: {SNAPSHOT}_{ROBUST_TASK}_{RATIO}_{formatted_time}"
-# save_dir = os.path.join("log", DATA, formatted_time[3:5], ROBUST_TASK)
-# os.makedirs(save_dir, exist_ok=True)
-
-# with open(rf"{save_dir}/{file_name}.txt", "w") as file:
-#   for idx, recs in enumerate(test_record):
-#     val, tests = recs
-#     print(f"At snapshot {idx}, we get:")
-#     file.write(f"At snapshot {idx}, we get:\n")
-    
-#     for metric, value in val.items():
-#       print(f"avg {metric}: {value}")
-#       file.write(f"avg {metric}: {value}\n")
-    
-#     print("\n")
-#     file.write("\n")
-    
-#     for metric, value in tests.items():
-#       print(f"test {metric}: {value}")
-#       file.write(f"test {metric}: {value}\n")
-    
-#     print("\n")
-#     file.write("\n")

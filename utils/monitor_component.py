@@ -34,8 +34,16 @@ class EarlyStopMonitor(object):
         torch.save(model.state_dict(), model_path)
         return
 
-    def data_store(self, data: Dict):
-        file_name = os.path.join(self.folder_path, f'val_test_result_Snapshot_{self.snapshot}.txt')
+    def snapshot_memory_clean(self):
+        """Reset early stopping state for a new snapshot"""
+        self.num_round = 0
+        self.epoch_count = 0  # This should be reset for each snapshot
+        self.best_epoch = 0
+        self.last_best = None
+
+    def data_store(self, data: Dict, hypers: Dict, time_records: Optional[list] = None):
+        hyper_suffix = '_'.join([f"{key}_{value}" for key, value in hypers.items()])
+        file_name = os.path.join(self.folder_path, f'val_test_result_Snapshot_{self.snapshot}_{hyper_suffix}.txt')
         with open(file_name, "w") as file:
             for idx, recs in enumerate(data):
                 val, tests = recs
@@ -55,6 +63,23 @@ class EarlyStopMonitor(object):
                 
                 print("\n")
                 file.write("\n")
+
+                # Write timing info if provided
+                if time_records is not None and idx < len(time_records):
+                    tr = time_records[idx]
+                    file.write("Timing Information:\n")
+                    file.write(f"  snapshot_index: {tr.get('snapshot', idx)}\n")
+                    # per-epoch times
+                    epoch_times = tr.get('epoch_train_times', [])
+                    if epoch_times:
+                        file.write("  epoch_train_times (s):\n")
+                        file.write(f"  avg_epoch_train_time: {np.mean(epoch_times):.4f}\n")
+                        file.write(f"  sum_epoch_train_time: {np.sum(epoch_times):.4f}\n")
+                    # snapshot total
+                    snap_t = tr.get('snapshot_total_time', None)
+                    if snap_t is not None:
+                        file.write(f"  snapshot_total_time: {snap_t:.4f}\n")
+                    file.write("\n")
 
     def store_args(self, args: Union[argparse.Namespace, Dict], format_type: str = 'both'):
         """
@@ -153,7 +178,10 @@ class EarlyStopMonitor(object):
         return self.folder_path
 
     def early_stop_check(self, curr_val: float, model: TGN, current_snapshot: int) -> bool:
-        # should be regarded as the core function, model store, data store should all be called after checking
+        """
+        Check if early stopping criteria is met
+        Returns True if training should stop, False otherwise
+        """
         if not self.higher_better:
             curr_val *= -1
         if self.last_best is None:
@@ -165,7 +193,8 @@ class EarlyStopMonitor(object):
             self.model_store(model, current_snapshot)
         else:
             self.num_round += 1
-            self.epoch_count += 1
+        
+        self.epoch_count += 1  # Always increment epoch count
         return self.num_round >= self.max_round
     
     

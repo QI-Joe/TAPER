@@ -128,6 +128,8 @@ class GraphDiffusionEmbedding(GraphEmbedding):
     assert(self.k!=0)
     
     self.kernel_fusion: KernelFusion = kernel_fusion
+    self.combination: str = args.combine
+    self.ablation_tppr=args.ablation_tppr
 
     if self.tppr_strategy=='streaming':
       insert_node = self.num_nodes
@@ -316,7 +318,8 @@ class GraphDiffusionEmbedding(GraphEmbedding):
       
       # Use proper kernel fusion instead of cosine trick
       # This implements the theoretical joint kernel: w_ij = π^TPPR_ij × h^TDSL_ij
-      weights = self.kernel_fusion.kernel_fuse(weights, temporal_decay_lap_weights, self.fusion_mode, combine_mode='non')
+      if not self.ablation_tppr:
+        weights = self.kernel_fusion.kernel_fuse(weights, temporal_decay_lap_weights, selected_delta_time, combine_mode=self.combination)
       
       # Normalize weights
       weights_sum = torch.sum(weights, dim=1)
