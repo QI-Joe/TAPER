@@ -361,9 +361,7 @@ class Temporal_Splitting(object):
 
     def sampling_layer(self, snapshots: int, views: int, span: float, strategy: str):
         T = []
-        if strategy == 'random':
-            T = [random.uniform(0, span * (snapshots - 1) / snapshots) for _ in range(views)]
-        elif strategy == 'low_overlap':
+        if strategy == 'low_overlap':
             if (0.75 * views + 0.25) > snapshots:
                 return "The number of sampled views exceeds the maximum value of the current policy."
             start = random.uniform(0, span - (0.75 * views + 0.25) * span /  snapshots)
@@ -384,6 +382,21 @@ class Temporal_Splitting(object):
         if span not in T: T[-1] = span
         if T[0] == float(0):
             T.pop(0)
+        return T
+
+    def time_sequential_select(self, snapshot: int, views: int, edge_attr):
+        unique_time=np.unique(edge_attr)
+        if views+1 > len(unique_time):
+            raise ValueError("The number of sampled views exceeds the maximum value of the current policy.")
+        batch = len(unique_time) // snapshot
+        T_list = unique_time[batch::batch]
+        random.seed(2025)
+        np.random.seed(2025)
+        T = random.sample(T_list.tolist(), views)
+        T= sorted(T)
+        if unique_time[-1] not in T: 
+            T.pop(6)
+            T.append(unique_time[-1].item())
         return T
 
     def sampling_layer_by_time(self, span, duration: int = 30):
@@ -427,11 +440,9 @@ class Temporal_Splitting(object):
         span = (max(edge_attr) - min(edge_attr)).item()
         views, strategy = snapshot-2, "sequential"
         T = self.sampling_layer(snapshot, views, span, strategy)
-
-        # for dynamic data loading
-        if self.dynamic:
-            inital_df = self.graph.time
-
+        if self.graph.edge_index.shape[1] > 1_000_000:
+            T = self.time_sequential_select(snapshot, views, edge_attr)
+        
         for idx, start in enumerate(T):
             if start<0.01: continue
 
@@ -441,12 +452,8 @@ class Temporal_Splitting(object):
             sample_time = (edge_attr<=end)
             sampled_edges = edge_index[:, sample_time]
             sampled_nodes = torch.unique(sampled_edges) if isinstance(sampled_edges, torch.Tensor) else np.unique(sampled_edges)
-            
-            if self.dynamic:
-                partial_df = inital_df[sample_time.numpy()]
-                y = self.dynamic_label(partial_df)
-            else:
-                y = self.n_id.get_label_by_node(sampled_nodes)
+        
+            y = self.n_id.get_label_by_node(sampled_nodes)
             subpos = pos[self.n_id.sample_idx(sampled_nodes)]
 
             # Zebra node classification will not refresh node idx...To maintain global node structure

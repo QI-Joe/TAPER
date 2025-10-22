@@ -12,7 +12,7 @@ from model.tgn_model import TGN
 from utils.kernel_utils import KernelFusion
 from utils.util import RandEdgeSampler, get_neighbor_finder
 from utils.monitor_component import EarlyStopMonitor
-from utils.data_processing import get_data_TPPR, get_Temporal_data_TPPR_Node_Justification, get_simplified_temporal_data, Data
+from utils.data_processing import Data, get_simplified_temporal_data
 from sklearn.metrics import precision_score, roc_auc_score, accuracy_score
 from numba.core.errors import NumbaDeprecationWarning, NumbaPendingDeprecationWarning, NumbaTypeSafetyWarning
 from itertools import chain
@@ -27,20 +27,20 @@ warnings.simplefilter('ignore', category=NumbaPendingDeprecationWarning)
 warnings.simplefilter('ignore', category=NumbaTypeSafetyWarning)
 
 def str2bool(order: str)->bool:
-  if order in ["True", "1"]:
+  if order in ["True", "1", "true"]:
     return True
   return False
 
 parser = argparse.ArgumentParser('Self-supervised training with diffusion models')
-parser.add_argument('-d', '--data', type=str, help='Dataset name (eg. wikipedia or reddit)',default='dblp')
+parser.add_argument('-d', '--data', type=str, help='Dataset name (eg. wikipedia or reddit)',default='tmall')
 parser.add_argument('--bs', type=int, default=10000, help='Batch_size')
 parser.add_argument('--n_degree', type=int, default=8, help='Number of neighbors to sample')
 parser.add_argument('--n_head', type=int, default=7, help='Number of heads used in attention layer')
-parser.add_argument('--n_epoch', type=int, default=300, help='Number of epochs')
+parser.add_argument('--n_epoch', type=int, default=600, help='Number of epochs')
 parser.add_argument('--n_layer', type=int, default=2, help='Number of network layers')
-parser.add_argument('--lr', type=float, default=1e-2, help='Learning rate')
-parser.add_argument('--patience', type=int, default=5, help='Patience for early stopping')
-parser.add_argument('--snapshot', type=int, default=10, help='Number of runs')
+parser.add_argument('--lr', type=float, default=5e-4, help='Learning rate')
+parser.add_argument('--patience', type=int, default=4, help='Patience for early stopping')
+parser.add_argument('--snapshot', type=int, default=15, help='Number of runs')
 parser.add_argument('--drop_out', type=float, default=0.3, help='Dropout probability')
 parser.add_argument('--gpu', type=int, default=0, help='Idx for the gpu to use')
 parser.add_argument('--use_memory', default=True, type=bool, help='Whether to augment the model with a node memory')
@@ -72,7 +72,7 @@ parser.add_argument('--graph_mu', type=float, default=1.0, help='Diffusion param
 parser.add_argument('--max_nodes', type=int, default=10000, help='Maximum number of nodes for graph kernel')
 parser.add_argument('--fusion_mode', type=str, default='cosine', choices=['product', 'cosine', 'harmonic', 'geometric', 'fusion'], help='Kernel fusion strategy')
 parser.add_argument('--combine', type=str, default="non", choices=['non', 'full'], help='Time-Series Merge')
-parser.add_argument('--ablation_tppr', type=bool, default=False, help="Ablation test on only tppr value")
+parser.add_argument('--ablation_tppr', type=str, default="merge", choices=["merge", "tdsl", "tppr"], help="Ablation test on only tppr value")
 
 parser.add_argument('--ignore_edge_feats', action='store_true')
 parser.add_argument('--ignore_node_feats', action='store_true')
@@ -104,6 +104,7 @@ EPOCH_INTERVAL = 25
 RATIO = int(args.ratio) if args.ratio>10 else args.ratio
 SNAPSHOT = args.snapshot
 
+print("Ablation choice:", args.ablation_tppr)
 round_list, graph_num, graph_feature, edge_num = get_simplified_temporal_data(DATA, snapshot=SNAPSHOT, dynamic=dynamic, task=ROBUST_TASK, ratio=RATIO)
 
 device_string = 'cuda:{}'.format(GPU) if torch.cuda.is_available() else 'cpu'
@@ -119,15 +120,16 @@ VIEW = len(round_list)
 model = "Zebra-Lap"
 early_stopper = EarlyStopMonitor(max_round=args.patience, dataset=DATA, snapshot=SNAPSHOT, higher_better=True)
 print(f"Given task is {ROBUST_TASK}")
-for i in range(1):
+for i in range(-3, 0):
 
   # Reset early stopping state for each snapshot
   early_stopper.snapshot_memory_clean()
   snapshot_start_time = time.time()
   epoch_train_times = []  # per-epoch training time for this snapshot
   
-  full_data, train_data, val_data, test_data, train_learn, nn_val_data, nn_test_data, n_nodes, n_edges = round_list[i]
+  full_data, train_data, val_data, test_data, transductive_test_data, train_learn, nn_val_data, nn_test_data, n_nodes, n_edges = round_list[i]
   num_classes = np.max(full_data.labels)+1
+  basin_snapshot = VIEW-abs(i)
 
   args.n_nodes = graph_num +1
   args.n_edges = edge_num +1
@@ -149,6 +151,7 @@ for i in range(1):
     fuse_mode=args.fusion_mode,
     time_rff_dim=args.time_rff_dim,
     time_sigma=args.time_rff_sigma, 
+    combine_mode=args.combine,
     device=device
   )
 
@@ -235,11 +238,6 @@ for i in range(1):
     
       sample_node = np.array(list(set(batch_train)))
       
-      # sample_node = vector_map(sample_node)
-      # train_match_list, train_tranucated_label = train_data.robustness_match_tuple
-      # node_allow2see_mask = np.isin(sample_node, train_match_list) & (train_data.labels[sample_node] != -1)
-      # node_allow2see_mask = np.ones_like(sample_node, dtype=bool)
-      
       labels = train_data.labels[sample_node] # [node_allow2see_mask]
       labels_on_GPU = labels.type(torch.LongTensor).to(device) # for label matching, it may need 2 mask...
       
@@ -257,11 +255,11 @@ for i in range(1):
         train_loss.append(loss.item())
         train_ap.append(precision_score(labels_numpy.reshape(-1,1), node_pred.reshape(-1,1), average="macro", zero_division=1.0))
         train_acc.append(accuracy_score(labels_numpy.reshape(-1,1), node_pred.reshape(-1,1)))
-    print(f"(TPPR) | snapshot {i} epoch {epoch} train ACC {np.mean(train_acc):.5f}, train AP {np.mean(train_ap):.5f}, Loss: {np.mean(train_loss):.4f}")
+    print(f"(TPPR) | snapshot {basin_snapshot} epoch {epoch} train ACC {np.mean(train_acc):.5f}, train AP {np.mean(train_ap):.5f}, Loss: {np.mean(train_loss):.4f}")
 
     # always record epoch training time, even if we skip eval this epoch
     epoch_train_time = time.time() - t_epoch_train_start
-    t_total_epoch_train += epoch_train_time
+    t_total_epoch_train += 1
     epoch_train_times.append(epoch_train_time)
 
     # aggregate train metrics
@@ -323,7 +321,7 @@ for i in range(1):
     with torch.no_grad():
       val_emb, val_label = batch_train(val_data, batch_size=BATCH_SIZE)
     
-    val_check = eval_check(val_emb, val_label, prj_model = projector)
+    val_check = eval_check(val_emb, val_label)
     
     val_tppr_backup = embedding_module.backup_tppr()
     tgn.memory.restore_memory(train_memory_backup)
@@ -334,8 +332,10 @@ for i in range(1):
       nn_val_timestamps = np.concatenate([nn_val_data.timestamps, nn_val_data.timestamps])
       embedding_module.streaming_topk_node(source_nodes=nn_val_source, timestamps=nn_val_timestamps, edge_idxs=nn_val_data.edge_idxs)
       nn_val_emb, nn_val_label = batch_train(nn_val_data, batch_size=BATCH_SIZE)
-    nn_val_check = eval_check(nn_val_emb, nn_val_label, prj_model = projector)
-
+    nn_val_check = eval_check(nn_val_emb, nn_val_label)
+    
+    
+    val_memory_backup = tgn.memory.backup_memory()
     tgn.memory.restore_memory(train_memory_backup)
     if args.tppr_strategy=='streaming':
       tgn.embedding_module.restore_tppr(train_tppr_backup)
@@ -348,10 +348,7 @@ for i in range(1):
     t_test_start=time.time()
 
     ### transductive test
-    val_memory_backup = tgn.memory.backup_memory()
-    # if args.tppr_strategy=='streaming':
-    #   val_tppr_backup = tgn.embedding_module.backup_tppr()
-
+    print("----"*5, "Validation done, Start on test training.", "----"*5)
     tgn.embedding_module.reset_tppr() # reset tppr to all 0
     test_source = np.concatenate([test_data.sources, test_data.destinations])
     test_timestamps = np.concatenate([test_data.timestamps, test_data.timestamps])
@@ -363,8 +360,13 @@ for i in range(1):
     
     with torch.no_grad():
       test_emb, test_label = batch_train(test_data, batch_size=BATCH_SIZE)
+      transductive_test_emb, transductive_test_label = batch_train(transductive_test_data, batch_size=BATCH_SIZE)
+      nn_test_emb, nn_test_label = batch_train(nn_test_data, batch_size=BATCH_SIZE)
 
-    test_check = eval_check(test_emb, test_label, prj_model = projector)
+    test_check = eval_check(test_emb, test_label)
+    transductive_test_check = eval_check(transductive_test_emb, transductive_test_label)
+    nn_test_check = eval_check(nn_test_emb, nn_test_label)
+    
     # store the test_tppr and save update cost
     test_tppr_backup = embedding_module.backup_tppr()
     """
@@ -372,18 +374,6 @@ for i in range(1):
     Transductive: val_acc, val_prec, val_recall, val_f1; test_acc, test_prec, test_recall, test_f1
     Inductive: nn_val_acc, nn_val_prec, nn_val_recall, nn_val_f1; nn_test_acc, nn_test_prec, nn_test_recall, nn_test_f1
     """
-
-    tgn.memory.restore_memory(train_memory_backup)
-    if args.tppr_strategy=='streaming':
-      tgn.embedding_module.restore_tppr(train_tppr_backup)
-      
-    with torch.no_grad():
-      nn_test_source = np.concatenate([nn_test_data.sources, nn_test_data.destinations])
-      nn_test_timestamps = np.concatenate([nn_test_data.timestamps, nn_test_data.timestamps])
-      embedding_module.streaming_topk_node(source_nodes=nn_test_source, timestamps=nn_test_timestamps, edge_idxs=nn_test_data.edge_idxs)
-      nn_test_emb, nn_test_label = batch_train(nn_test_data, batch_size=BATCH_SIZE)
-
-    nn_test_check = eval_check(nn_test_emb, nn_test_label, prj_model = projector)
 
     tgn.memory.restore_memory(train_memory_backup)
     if args.tppr_strategy=='streaming':
@@ -398,8 +388,8 @@ for i in range(1):
     current_test_acc = test_check["val_acc"]  # Assuming this is the correct key for test accuracy
 
     simple_key = "val"
-    for name, data in zip(["val", "nn_val", "test", "nn_test"], [val_check, nn_val_check, test_check, nn_test_check]):
-      print(f"TPPR at {i+1} Snapshot |"+" ".join([f"{dkey.replace(simple_key, name)} value is: {dval:.4f}" for dkey, dval in data.items()]))
+    for name, data in zip(["val", "nn_val", "test", "transductive_test", "nn_test"], [val_check, nn_val_check, test_check, transductive_test_check, nn_test_check]):
+      print(f"TPPR at {basin_snapshot+1} Snapshot |"+" ".join([f"{dkey.replace(simple_key, name)} value is: {dval:.4f}" for dkey, dval in data.items()]))
 
     print(f'### num_epoch time {NUM_EPOCH}, epoch_train time {round(t_total_epoch_train/NUM_EPOCH, 4)}, epoch_val time {round(t_total_epoch_val/NUM_EPOCH, 4)}, epoch_test time {round(t_test, 4)}, train_tppr time {round(np.mean(train_tppr_time), 4)}')
     # print(f"### all epoch train time {round(t_total_epoch_train, 4)}, entire tppr finder time {round(np.sum(train_tppr_time), 4)}, entire run time without data loading: {round(time.time()-all_run_times, 4)}")
@@ -416,6 +406,15 @@ for i in range(1):
     merged_test_check = {}
     for key, value in test_check.items():
       merged_test_check[key] = value
+      
+    for key, value in transductive_test_check.items():
+      if key.startswith("val_"): 
+        new_key = "transductive_test_" + key[4:]
+        merged_test_check[new_key] = value
+      else:
+        new_key = "transductive_test_" + key
+        merged_test_check[new_key] = value
+      
     for key, value in nn_test_check.items():
       if key.startswith("val_"): 
         new_key = "nn_test_" + key[4:]
@@ -427,7 +426,7 @@ for i in range(1):
     snapshot_list.append((merged_val_check, merged_test_check))
     
     # Check for early stopping
-    if early_stopper.early_stop_check(current_test_acc, tgn, i):
+    if early_stopper.early_stop_check(current_test_acc, tgn, basin_snapshot):
       patience_limit = early_stopper.max_round
       print(f'Early stopping triggered after {patience_limit} epochs without improvement.')
       break
@@ -461,7 +460,7 @@ for i in range(1):
   # snapshot timing
   snapshot_total_time = time.time() - snapshot_start_time
   time_records.append({
-    "snapshot": i,
+    "snapshot": basin_snapshot,
     "epoch_train_times": epoch_train_times,
     "snapshot_total_time": snapshot_total_time
   })
