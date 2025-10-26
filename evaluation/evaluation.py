@@ -37,6 +37,8 @@ class LogRegression(torch.nn.Module):
         return ret
 
 def eval_edge_prediction(model, negative_edge_sampler, data, n_neighbors, batch_size):
+  if len(data.sources) == 0:
+      return 0.0, 0.0, 0.0
 
   assert negative_edge_sampler.seed is not None
   negative_edge_sampler.reset_random_state()
@@ -292,13 +294,12 @@ def fast_eval_check(src_combination, data: Data, emb, prj_model):
     return val_dict
 
 
-def eval_check(emb: torch.Tensor, label: torch.Tensor, prj_model: torch.nn.Module):
-    prj_model.eval()
-    with torch.no_grad():
-        output: torch.Tensor = prj_model(emb)
-
-    y_true = label
-    y_hat = output.argmax(-1).cpu().numpy()
+def eval_check(emb: torch.Tensor, label: torch.Tensor):
+    if len(emb)==0 or len(label)==0:
+        return {"val_acc": 0.0, "val_prec": 0.0, "val_recall": 0.0, "val_f1": 0.0}
+    
+    y_true = label.cpu().numpy()
+    y_hat = emb.argmax(-1).cpu().numpy()
 
     node_allow2see_mask = (y_true != -1) # add here due to test data will have -1 label
     val_allow2see, val_label_allow2see = y_hat[node_allow2see_mask], y_true[node_allow2see_mask]

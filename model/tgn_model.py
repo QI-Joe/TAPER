@@ -106,7 +106,7 @@ class TGN(torch.nn.Module):
     if args.tppr_strategy=='None':
         hidden_dim=self.n_node_features
     else:
-        hidden_dim=self.n_node_features*(len(args.alpha_list)+1)
+        hidden_dim=self.n_node_features*(len(args.alpha_list)+1)*2
 
     print(f'hidden_dim {hidden_dim}')
     self.affinity_score = MergeLayer(hidden_dim, hidden_dim, hidden_dim,1)
@@ -151,8 +151,8 @@ class TGN(torch.nn.Module):
         self.test_mode=True
       memory = self.memory.memory
 
-    
-    node_embedding = self.embedding_module.compute_embedding_tppr_ensemble(memory=memory,source_nodes=nodes,timestamps=timestamps,edge_idxs=edge_idxs,memory_updater = self.memory_updater,train=train)
+
+    node_embedding = self.embedding_module.compute_embedding_tppr_node(memory=memory,source_nodes=nodes,timestamps=timestamps,memory_updater = self.memory_updater,train=train, lap_memory=self.laplacian_memory)
   
     source_node_embedding = node_embedding[:n_samples]
     destination_node_embedding = node_embedding[n_samples: 2 * n_samples]
@@ -198,8 +198,7 @@ class TGN(torch.nn.Module):
       memory = self.memory.memory
 
 
-    node_embedding = self.embedding_module.compute_embedding_tppr_node(memory=memory, source_nodes=positives, timestamps=edge_times,
-                        memory_updater=self.memory_updater, train=train, lap_memory=self.laplacian_memory)
+    node_embedding = self.embedding_module.compute_embedding_tppr_node(memory=memory, source_nodes=positives, timestamps=edge_times, memory_updater=self.memory_updater, train=train, lap_memory=self.laplacian_memory)
 
     self.update_memory(self.memory, unique_positives) 
     self.memory.clear_messages(unique_positives)
@@ -211,23 +210,18 @@ class TGN(torch.nn.Module):
 
     #### compute temporal embedding ####
     n_samples = len(source_nodes)
-    source_node_embedding, destination_node_embedding, negative_node_embedding = self.compute_temporal_embeddings(source_nodes, destination_nodes, negative_nodes, edge_times, edge_idxs, n_neighbors,train)
+    source_node_embedding, destination_node_embedding, negative_node_embedding = self.compute_temporal_node_embeddings(source_nodes, destination_nodes, negative_nodes, edge_times, edge_idxs, n_neighbors,train)
 
     #### calculate prediction score ####
-    score = self.affinity_score(torch.cat([source_node_embedding, source_node_embedding], dim=0),torch.cat([destination_node_embedding,negative_node_embedding])).squeeze(dim=0)
-    pos_score = score[:n_samples]
-    neg_score = score[n_samples:]
-    return pos_score.sigmoid(), neg_score.sigmoid()
-
-  def link_regression_probability(self, projector, node_emb: Tensor, edges: Tensor):
-    stop_idx = edges.shape[0] // 2
+    score = self.affinity_score(torch.cat([source_node_embedding, source_node_embedding], dim=0),torch.cat([destination_node_embedding,negative_node_embedding]))
     
-    src = node_emb[edges[:stop_idx]]
-    dst = node_emb[edges[stop_idx: ]]
+    if score.dim() == 2 and score.size(-1) == 1:
+      score = score.squeeze(-1)
+    
+    pos_score = score[:n_samples]   # pos_score = self.affinity_score(source_node_embedding, destination_node_embedding)
+    neg_score = score[n_samples:]  # neg_score = self.affinity_score(destination_node_embedding, negative_node_embedding)
+    return pos_score, neg_score
 
-    assert src.shape[0] == dst.shape[0], f"src shape {src.shape} and dst shape {dst.shape} not match"
-    output = torch.vstack((src, dst))
-    return projector.forward(output)
 
   def update_memory(self, memory, positives):
     with torch.no_grad():

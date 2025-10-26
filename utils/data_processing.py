@@ -522,42 +522,6 @@ def get_data_TPPR(dataset_name, snapshot: int, dynamic: bool, task: str, ratio: 
 
     return TPPR_list, graph_num_node, graph_feat, edge_number
 
-def batch_processor(data_label: dict[dict[int, np.ndarray]], data: Data)->list[tuple[np.ndarray]]:
-  time_stamp = data.timestamps
-  unique_ts = np.unique(time_stamp)
-  idx_list = np.arange(time_stamp.shape[0])
-  time_keys = list(data_label.keys())
-
-  last_idx = 0
-  batch_list: list[tuple] = list()
-  for ts in unique_ts:
-    time_mask = time_stamp==ts
-    time_mask[:last_idx] = False
-    if ts not in time_keys:
-      # print(ts)
-      if time_mask.sum() != 0:
-        last_idx = idx_list[time_mask][-1]
-      continue
-
-    temp_dict = data_label[ts]
-    keys = np.array(list(temp_dict.keys()))
-    values = np.array(list(temp_dict.values()))
-
-    unique_time_nodes = set(data.sources[time_mask]) | set(data.destinations[time_mask])
-    # if len(unique_time_nodes) != len(keys):
-    #   print(f"At time {ts}; Under the same timetable the unique node {len(unique_time_nodes)} size and {len(set(keys))} isnt matched")
-    #   print(f"The different unique nodes are {unique_time_nodes - set(keys)} \n")
-
-    sort_idx = np.argsort(keys)
-    sort_key = keys[sort_idx]
-    values = values[sort_idx, :]
-    last_idx = idx_list[time_mask][-1]
-
-    backprop_mask = np.isin(np.array(sorted(unique_time_nodes)), sort_key)
-
-    batch_list.append((backprop_mask, values, time_mask))
-  return batch_list
-  
 
 def TGB_load(train, val, test, node_feat):
 
@@ -610,20 +574,7 @@ def batch_processor(data_label: dict[dict[int, np.ndarray]], data: Data)->list[t
   return batch_list
 
 
-# path = "data/mooc/ml_mooc.npy"
-# edge = np.load(path)
-def load_feat(d):
-    node_feats = None
-    if os.path.exists('../data/{}/ml_{}_node.npy'.format(d,d)):
-        node_feats = np.load('../data/{}/ml_{}_node.npy'.format(d,d)) 
-
-    edge_feats = None
-    if os.path.exists('../data/{}/ml_{}.npy'.format(d,d)):
-        edge_feats = np.load('../data/{}/ml_{}.npy'.format(d,d))
-    return node_feats, edge_feats
-
-
-def get_simplified_temporal_data(dataset_name, snapshot: int, dynamic: bool, task: str="None", ratio: float = 0.0):
+def get_simplified_temporal_data(dataset_name, snapshot: int, dynamic: bool, task: str="None", ratio: float = 0.0)-> list[list[Data], int, np.ndarray, int]:
     """
     Simplified function for inductive validation without robustness/edge_disturb/fsl settings
     
@@ -764,7 +715,7 @@ def get_simplified_temporal_data(dataset_name, snapshot: int, dynamic: bool, tas
             test_mask = test_src_mask | test_dst_mask
             nn_test_mask = test_src_mask & test_dst_mask
             
-            test_data = Data(
+            transduc_test_data = Data(
                 test_data.sources[test_mask],
                 test_data.destinations[test_mask],
                 test_data.timestamps[test_mask],
@@ -783,6 +734,8 @@ def get_simplified_temporal_data(dataset_name, snapshot: int, dynamic: bool, tas
                 hash_table=test_data.hash_table,
                 node_feat=test_data.node_feat
             )
+            if nn_test_data.sources.shape[0] == 0:
+                nn_test_data = copy.deepcopy(transduc_test_data)
         
         node_num = items.num_nodes
         node_edges = items.num_edges
@@ -791,116 +744,7 @@ def get_simplified_temporal_data(dataset_name, snapshot: int, dynamic: bool, tas
         # For simplicity, we'll use train_data as train_data_edge_learn (can be refined if needed)
         train_data_edge_learn = copy.deepcopy(train_data)
         
-        TPPR_list.append([full_data, train_data, val_data, test_data, train_data_edge_learn, nn_val_data, nn_test_data, node_num, node_edges])
+        TPPR_list.append([full_data, train_data, val_data, test_data, transduc_test_data, train_data_edge_learn, nn_val_data, nn_test_data, node_num, node_edges])
     
     return TPPR_list, graph_num_node, graph_feat, edge_number
-
-
-def get_data(dataset_name):
-  """
-  Simplified get_data function using the new simplified temporal data loading
-  for transductive validation/test with nn_validation and nn_test data
-  """
-  # Use the simplified temporal data function with single snapshot
-  TPPR_list, graph_num_node, graph_feat, edge_number = get_simplified_temporal_data(
-      dataset_name=dataset_name, 
-      snapshot=10,  # Single snapshot for simplicity
-      dynamic=False
-  )
-  
-  # Extract the data from the first (and only) snapshot
-  selected_index = [0, -1]
-  for idx in selected_index:
-      full_data, train_data, val_data, test_data, train_data_edge_learn, nn_val_data, nn_test_data, node_num, node_edges = TPPR_list[idx]
-
-      print("The dataset has {} interactions, involving {} different nodes".format(
-          full_data.n_interactions, full_data.n_unique_nodes))
-      print("The training dataset has {} interactions, involving {} different nodes".format(
-          train_data.n_interactions, train_data.n_unique_nodes))
-      print("The validation dataset has {} interactions, involving {} different nodes".format(
-          val_data.n_interactions, val_data.n_unique_nodes))
-      print("The test dataset has {} interactions, involving {} different nodes".format(
-          test_data.n_interactions, test_data.n_unique_nodes))
-      print("The nn validation dataset has {} interactions, involving {} different nodes".format(
-          nn_val_data.n_interactions, nn_val_data.n_unique_nodes))
-      print("The nn test dataset has {} interactions, involving {} different nodes".format(
-          nn_test_data.n_interactions, nn_test_data.n_unique_nodes))
-      print("-----"*20)
-      
-      
-
-
-def get_data_original(dataset_name):
-  """
-  Original get_data function - loads from CSV format with manual inductive validation setup
-  """
-  graph_df = pd.read_csv('data/{}/ml_{}.csv'.format(dataset_name,dataset_name))
-
-  #edge_features = np.load('../data/{}/ml_{}.npy'.format(dataset_name,dataset_name))
-  #node_features = np.load('../data/{}/ml_{}_node.npy'.format(dataset_name,dataset_name)) 
-  #node_features, edge_features = load_feat(dataset_name)
-
-  val_time, test_time = list(np.quantile(graph_df.ts, [0.70, 0.85]))
-  sources = graph_df.u.values
-  destinations = graph_df.i.values
-  edge_idxs = graph_df.idx.values
-  labels = graph_df.label.values
-  timestamps = graph_df.ts.values
-  full_data = Data(sources, destinations, timestamps, edge_idxs, labels)
-  
-  # ensure we get the same graph
-  random.seed(2020)
-  node_set = set(sources) | set(destinations)
-  n_total_unique_nodes = len(node_set)
-  n_edges = len(sources)
-
-  test_node_set = set(sources[timestamps > val_time]).union(set(destinations[timestamps > val_time]))
-  new_test_node_set = set(random.sample(sorted(test_node_set), int(0.1 * n_total_unique_nodes)))
-  new_test_source_mask = graph_df.u.map(lambda x: x in new_test_node_set).values
-  new_test_destination_mask = graph_df.i.map(lambda x: x in new_test_node_set).values
-
-  observed_edges_mask = np.logical_and(~new_test_source_mask, ~new_test_destination_mask)
-  train_mask = np.logical_and(timestamps <= val_time, observed_edges_mask)
-  train_data = Data(sources[train_mask], destinations[train_mask], timestamps[train_mask],
-                    edge_idxs[train_mask], labels[train_mask])
-  train_node_set = set(train_data.sources).union(train_data.destinations)
-  assert len(train_node_set & new_test_node_set) == 0
-
-
-  # * the val set can indeed contain the new test node
-  new_node_set = node_set - train_node_set
-  val_mask = np.logical_and(timestamps <= test_time, timestamps > val_time)
-
-  test_mask = timestamps > test_time
-  edge_contains_new_node_mask = np.array([(a in new_node_set or b in new_node_set) for a, b in zip(sources, destinations)])
-  new_node_val_mask = np.logical_and(val_mask, edge_contains_new_node_mask)
-  new_node_test_mask = np.logical_and(test_mask, edge_contains_new_node_mask)
-
-  val_data = Data(sources[val_mask], destinations[val_mask], timestamps[val_mask],
-                  edge_idxs[val_mask], labels[val_mask])
-  test_data = Data(sources[test_mask], destinations[test_mask], timestamps[test_mask],
-                   edge_idxs[test_mask], labels[test_mask])
-  new_node_val_data = Data(sources[new_node_val_mask], destinations[new_node_val_mask],
-                           timestamps[new_node_val_mask],
-                           edge_idxs[new_node_val_mask], labels[new_node_val_mask])
-  new_node_test_data = Data(sources[new_node_test_mask], destinations[new_node_test_mask],
-                            timestamps[new_node_test_mask], edge_idxs[new_node_test_mask],
-                            labels[new_node_test_mask])
-
-
-  print("The dataset has {} interactions, involving {} different nodes".format(full_data.n_interactions,full_data.n_unique_nodes))
-  print("The training dataset has {} interactions, involving {} different nodes".format(
-    train_data.n_interactions, train_data.n_unique_nodes))
-  print("The validation dataset has {} interactions, involving {} different nodes".format(
-    val_data.n_interactions, val_data.n_unique_nodes))
-  print("The test dataset has {} interactions, involving {} different nodes".format(
-    test_data.n_interactions, test_data.n_unique_nodes))
-  print("The new node validation dataset has {} interactions, involving {} different nodes".format(
-    new_node_val_data.n_interactions, new_node_val_data.n_unique_nodes))
-  print("The new node test dataset has {} interactions, involving {} different nodes".format(
-    new_node_test_data.n_interactions, new_node_test_data.n_unique_nodes))
-  print("{} nodes were used for the inductive testing, i.e. are never seen during training".format(len(new_test_node_set)))
-
-  return full_data, train_data, val_data, test_data, \
-         new_node_val_data, new_node_test_data, n_total_unique_nodes, n_edges
 
