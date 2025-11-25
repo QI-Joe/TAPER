@@ -1,6 +1,4 @@
-# Zebra-Laplacian
-
-## TAPER: Temporal Attenuated PageRank with Spectral Regularization
+# TAPER: Temporal Attenuated PageRank with Spectral Regularization
 
 TAPER integrates temporal Personalized PageRank (TPPR) with time-aware spectral diffusion on the normalized Laplacian to improve sensitivity for newly emergent nodes and edges in dynamic graphs, addressing TPPR's limitation in capturing rapidly changing topology structures.
 
