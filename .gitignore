@@ -157,6 +157,7 @@ data/
 saved_checkpoints/
 data_check/
 test_code.py
+markdown/
 
 *.md
 *.txt

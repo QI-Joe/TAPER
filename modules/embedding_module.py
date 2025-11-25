@@ -146,9 +146,8 @@ class GraphDiffusionEmbedding(GraphEmbedding):
   def restore_tppr(self, backup):
     self.tppr_finder.restore_tppr(backup)
 
-
-  def streaming_topk(self,source_nodes, timestamps, edge_idxs):
-    return self.tppr_finder.streaming_topk(source_nodes,timestamps,edge_idxs)
+  def streaming_topk_link(self,source_nodes, timestamps):
+    return self.tppr_finder.single_extraction(source_nodes, timestamps)
 
   def streaming_topk_node(self,source_nodes, timestamps, edge_idxs):
     return self.tppr_finder.streaming_topk_modified(source_nodes, timestamps, edge_idxs)
@@ -177,7 +176,7 @@ class GraphDiffusionEmbedding(GraphEmbedding):
     sample_node = list(set(source_node))
     assert len(sample_node) == node_timestamp.shape[0], "Sample node and corresponding time stamp is not matched"
 
-    return self.tppr_finder.single_extraction(sample_node, node_timestamp), sample_node
+    return self.tppr_finder.single_extraction(sample_node, timestamps, edge_source=source_node), sample_node
 
   def streaming_topk_no_fake(self,source_nodes, timestamps, edge_idxs):
     return self.tppr_finder.streaming_topk_no_fake(source_nodes,timestamps,edge_idxs)
@@ -189,14 +188,12 @@ class GraphDiffusionEmbedding(GraphEmbedding):
     else:
       self.tppr_finder.compute_val_tppr(sources, targets,timestamps, edge_idxs)
 
-  def compute_embedding_tppr_ensemble(self, memory, source_nodes, timestamps, edge_idxs, memory_updater,train):
-
+  def compute_embedding_tppr_ensemble(self, memory, source_nodes, timestamps, memory_updater,train, lap_memory: EfficentMemory): 
+    
     source_nodes=np.array(source_nodes,dtype=np.int32)
     t=time.time()
     if self.tppr_strategy=='streaming': 
-      selected_node_list,selected_edge_idxs_list,selected_delta_time_list,selected_weight_list=self.streaming_topk(source_nodes, timestamps, edge_idxs)       
-    elif self.tppr_strategy=='pruning':
-      selected_node_list,selected_edge_idxs_list,selected_delta_time_list,selected_weight_list=self.pruning_topk(source_nodes, timestamps)
+      selected_node_list,selected_edge_idxs_list,selected_delta_time_list,selected_weight_list, selected_decay_list = self.streaming_topk_link(source_nodes, timestamps)       
     self.t_tppr+=time.time()-t
 
     if train:
@@ -206,13 +203,16 @@ class GraphDiffusionEmbedding(GraphEmbedding):
 
     n_edge=selected_weight_list[0].shape[0]//3
     self.average_topk=np.mean(np.sum(selected_weight_list[0][:2*n_edge],axis=1))
+    selected_laplcian_memory = list()
 
     ### transfer from CPU to GPU
     for i in range(self.n_tppr):
+      selected_laplcian_memory.append(lap_memory.get_snapshot_memory(source_nodes, selected_node_list[i]))
       selected_node_list[i] = torch.from_numpy(selected_node_list[i]).long().to(self.device,non_blocking=True)
       selected_edge_idxs_list[i] = torch.from_numpy(selected_edge_idxs_list[i]).long().to(self.device,non_blocking=True)
       selected_delta_time_list[i] = torch.from_numpy(selected_delta_time_list[i]).float().to(self.device,non_blocking=True)
       selected_weight_list[i] = torch.from_numpy(selected_weight_list[i]).float().to(self.device,non_blocking=True)
+      selected_decay_list[i] = torch.from_numpy(selected_decay_list[i]).float().to(self.device,non_blocking=True)
 
     ### transform source embeddings
     nodes_0 = source_nodes
@@ -241,6 +241,11 @@ class GraphDiffusionEmbedding(GraphEmbedding):
 
       # normalize the weights here, very important step!
       weights=selected_weight_list[index]
+      
+      lap_weights = torch.from_numpy(selected_laplcian_memory[index]).float().to(self.device,non_blocking=True)
+      temporal_decay_lap_weights = selected_decay_list[index] * lap_weights
+      # weights = self.kernel_fusion.kernel_fuse(weights, temporal_decay_lap_weights, selected_delta_time, ablation=self.ablation_tppr)
+      
       weights_sum=torch.sum(weights,dim=1)
       weights=weights/weights_sum.unsqueeze(1)
       weights[weights_sum==0]=0
@@ -318,8 +323,7 @@ class GraphDiffusionEmbedding(GraphEmbedding):
       
       # Use proper kernel fusion instead of cosine trick
       # This implements the theoretical joint kernel: w_ij = π^TPPR_ij × h^TDSL_ij
-      if not self.ablation_tppr:
-        weights = self.kernel_fusion.kernel_fuse(weights, temporal_decay_lap_weights, selected_delta_time, combine_mode=self.combination)
+      weights = self.kernel_fusion.kernel_fuse(weights, temporal_decay_lap_weights, selected_delta_time, ablation=self.ablation_tppr)
       
       # Normalize weights
       weights_sum = torch.sum(weights, dim=1)

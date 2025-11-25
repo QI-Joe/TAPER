@@ -4,126 +4,19 @@ import torch
 import random
 import math
 from torch_geometric.data import Data
-import copy
 import os
 from typing import Any, Union, Optional, Tuple
-from multipledispatch import dispatch
 import os.path as osp
 from torch_geometric.datasets import Planetoid, CitationFull, WikiCS, Coauthor, Amazon
 import torch_geometric.transforms as T
-from datetime import datetime
-import itertools
 
-from tgb.nodeproppred.dataset import NodePropPredDataset
-
-import enum
 
 MOOC, Mooc_extra = "Temporal_Dataset/act-mooc/act-mooc/", ["mooc_action_features", "mooc_action_labels", "mooc_actions"]
-MATHOVERFLOW, MathOverflow_extra = "Temporal_Dataset/mathoverflow/", ["sx-mathoverflow-a2q", "sx-mathoverflow-c2a", "sx-mathoverflow-c2q", "sx-mathoverflow"]
 OVERFLOW = r"../TestProejct/Temporal_Dataset/"
-STATIC = ["mathoverflow", "dblp", "askubuntu", "stackoverflow", "mooc"]
+STATIC = ["mathoverflow", "dblp", "askubuntu", "stackoverflow", "mooc", "dgraph"]
 DYNAMIC = ["mathoverflow", "askubuntu", "stackoverflow"]
 TGB = ["tgbn-trade", "tgbn-genre", "tgbn-reddit", "tgbn-token"]
 LARGE_SCALE = ["tmall", "tax51"]
-
-class NodeIdxMatching(object):
-
-    """
-    Not that appliable on train_mask or node_mask, at least in CLDG train_mask should be aggreated within NeigborLoader
-    as seed node, while it is computed manually to present "positive pair"
-    """
-
-    def __init__(self, is_df: bool, df_node: pd.DataFrame = None, nodes: np.ndarray = [], label: np.ndarray=[]) -> None:
-        """
-        self.node: param; pd.Dataframe has 2 columns,\n
-        'node': means node index in orginal entire graph\n
-        'label': corresponding label
-        """
-        super(NodeIdxMatching, self).__init__()
-        self.is_df = is_df
-        if is_df: 
-            if not df_node: raise ValueError("df_node is required")
-            self.node = df_node
-        else:
-            if not isinstance(nodes, (np.ndarray, list, torch.Tensor)): 
-                nodes = list(nodes)
-            if len(label) > len(nodes):
-                label = np.arange(len(nodes))
-            self.nodes = self.to_numpy(nodes)
-            self.node: pd.DataFrame = pd.DataFrame({"node": nodes, "label": label}).reset_index()
-
-    def to_numpy(self, nodes: Union[torch.Tensor, np.array]):
-        if isinstance(nodes, torch.Tensor):
-            if nodes.device == "cuda:0":
-                nodes = nodes.cpu().numpy()
-            else: 
-                nodes = nodes.numpy()
-        return nodes
-
-    def idx2node(self, indices: Union[np.array, torch.Tensor]) -> np.ndarray:
-        indices = self.to_numpy(indices)
-        node = self.node.node.iloc[indices]
-        return node.values
-    
-    def node2idx(self, node_indices: Union[np.array, torch.Tensor] = None) -> np.ndarray:
-        if node_indices is None:
-            return np.array(self.node.index)
-        node_indices = self.to_numpy(node_indices)
-        indices = self.node.node[self.node.node.isin(node_indices)].index
-        return indices.values
-    
-    def edge_restore(self, edges: torch.Tensor, to_tensor: bool = False) -> Union[torch.Tensor, np.array]:
-        edges = self.to_numpy(edges)
-        df_edges = pd.Series(edges.T).apply(lambda x: x.map(self.node.node))
-        if to_tensor: 
-            df_edges = torch.tensor(df_edges.values.T)
-        return df_edges.values
-    
-    def edge_replacement(self, df_edge: pd.DataFrame):
-        if not isinstance(df_edge, pd.Series):
-            df_edge = self.to_numpy(df_edge)
-            df_edge = pd.DataFrame(df_edge.T)
-        transfor_platform = self.node.node
-        transfor_platform = pd.Series(transfor_platform.index, index= transfor_platform.values)
-        # given function "map" and data series, iterate through col is the fastest way
-        df_edge = df_edge.apply(lambda x: x.map(transfor_platform))
-        return df_edge.values.T
-    
-    def get_label_by_node(self, node_indices: Union[torch.Tensor, list[int], np.ndarray]) -> list:
-        node_indices = self.to_numpy(node_indices)
-        idx_mask: pd.Series = self.node.node[self.node.node.isin(node_indices)].index
-        labels: list = self.node.label[idx_mask].values.tolist()
-        return np.array(labels)
-    
-    def get_label_by_idx(self, idx: Union[torch.Tensor, list[int], np.ndarray]) -> list:
-        idx = self.to_numpy(idx)
-        return self.node.label[idx].tolist()
-    
-    def sample_idx(self, node_indices: Union[torch.Tensor, list[int], np.ndarray]) -> torch.Tensor:
-        node_indices = self.to_numpy(node_indices)
-        idx_mask: pd.Series = self.node.node[self.node.node.isin(node_indices)].index
-        return list(idx_mask.values)
-    
-    def matrix_edge_replacement(self, src: pd.DataFrame)->np.ndarray:
-        nodes = self.node["node"].values
-        match_list = np.vstack((np.array(self.node.index), nodes))
-
-        node_list = self.node["node"].values.unique()
-        max_size = max(node_list) + 1
-        space_array = np.zeros((max_size,), dtype=np.int32)
-        idx = match_list[:, 0]
-        values = match_list[:, 1]
-
-        space_array[idx] = values
-
-
-        given_input = copy.deepcopy(src[["u", "i"]].values)
-
-        col1, col2 = given_input[:, 0], given_input[:, 1]
-        replace_col1 = space_array[col1]
-        replced_col2 = space_array[col2]
-        replaced_given = np.vstack((replace_col1, replced_col2)) # [2, n]
-        return replaced_given
 
 
 class Temporal_Dataloader(Data):
@@ -147,9 +40,6 @@ class Temporal_Dataloader(Data):
         self.test_mask = None
         self.val_mask = None
 
-        my_n_id_label = self.y if self.y.shape[0] == self.x.shape[0] else np.arange(self.x.shape[0])
-        self.my_n_id = NodeIdxMatching(False, nodes=self.x, label=my_n_id_label)
-        self.idx2node = self.my_n_id.node
         self.layer2_n_id: pd.DataFrame = None
         self.edge_pos: np.ndarray = None
         
@@ -173,28 +63,6 @@ class Temporal_Dataloader(Data):
                     for idx, dst in enumerate(key[src]) \
                         if dst>0 or value[src, idx] > 0]
 
-    def reverse_idx(self, key: list[list[int]], value: list[list[float]])->list[list[int]]:
-        """
-        reverse the node index in key back to new sorted node idx
-        key:param, a 2-layer nested list stores node grabbed from TPPR list
-        """
-        indices_sparse_container: list[list[int, int, float]] = []
-        for idx, idx_ in enumerate(key):
-            weight = value[idx]
-            for nid, w in zip(idx_, weight):
-                # nid: original node idx need to be replaced
-                # w: weight of the node
-                if w>0:
-                    mask = (self.my_n_id.node.node == nid)
-                    # during the tppr updating, becasue this is a progressive incresasing process
-                    # current snapshot may not contain the feedback NEIGHBOR node, 
-                    # so we need to check if the node is in the current snapshot
-                    if mask.sum() == 0:
-                        continue
-                    new_nid = self.my_n_id.node[mask].values[0][0]
-                    indices_sparse_container.append([idx, new_nid, w])
-        return indices_sparse_container
-
     def train_val_mask_injection(self, train_mask: np.ndarray, val_mask: np.ndarray, nn_val_mask: np.ndarray):
         """
         train_mask: param; a boolean array, True means the node is selected as training node
@@ -207,109 +75,10 @@ class Temporal_Dataloader(Data):
         
     def test_mask_injection(self, nn_test_mask: np.ndarray):
         self.nn_test_mask = nn_test_mask
-        
-    def get_node(self):
-        return self.my_n_id.node2idx(None)
-    
-    def get_edge_index(self):
-        return self.my_n_id.matrix_edge_replacement(self.edge_index)
-    
-    def get_Temporalgraph(self):
-        self.x = self.get_node()
-        self.edge_index = self.get_edge_index()
-        return self
-
-    def up_report(self):
-        reverse: pd.DataFrame = pd.DataFrame(self.idx2node.index, index=self.idx2node.values)
-        return reverse.to_dict()
-    
-    def establish_two_layer_idx_matching(self, large_idx: NodeIdxMatching) -> None:
-        if large_idx.node.shape[0] < self.my_n_id.node.shape[0]: # <= or < ?
-            raise ValueError("Input object should owns a parent graph of current stored temporal graph")
-        self.layer2_n_id = self.my_n_id.node.merge(large_idx.node, on="node", suffixes=["_subTemporal", "_Temporal"])
-        return
-
-    def single_layer_mask(self, mask, sub_nodes: torch.Tensor, match_list: pd.DataFrame, large_graph_length = None):
-        large_graph_length = self.pos.size(0)
-        node_idx = sub_nodes[mask]
-        large_graph_idx = match_list.index_Temporal[match_list.index_subTemporal.isin(node_idx)].values
-
-        new_mask = torch.full((large_graph_length, ), False, dtype=bool)
-        new_mask[large_graph_idx]=True
-        return new_mask
-
-    def mask_adjustment_two_layer_idx(self):
-        """
-        temporal_data: Temporal_Dataloader object, marked as Data for type declaration
-        temporal_data.x: consistent sequence node index of sub temporal graph, from 0 to n
-        temporal_data.pos: if dataset is Mathoverflow, then this is default node features compute from pos_encoding
-        otherwise it is defualt node features. in RoLAND model pos.size(0) >> x.size(0)
-        temporal_data.idx2node: node matching dataframe, based on original node idx to match corresponding index 
-        of different layer
-
-        :Feburary 11th--Depcrecated considering RoLAND doest need this
-        this function aims to solve unmatched node features and sub tmeporal graph size. In RoLAND model input is set
-        as total number of nodes; to keep on training the model input must has size n x features; where n is total number of nodes
-        
-        """
-        mask_train: torch.Tensor = self.train_mask
-        mask_val: torch.Tensor = self.val_mask
-        nodes = self.x
-        match_list: pd.DataFrame = self.layer2_n_id
-        self.kept_train_mask, self.kept_val_mask = self.train_mask, self.val_mask
-        self.train_mask = self.single_layer_mask(mask_train, nodes, match_list)
-        self.val_mask = self.single_layer_mask(mask_val, nodes, match_list)
-        return self
-
-
-class Dynamic_Dataloader(object):
-    """
-    a class to store a group of temporal dataset, calling with updated event running
-    return a temporal data every time
-    """
-    def __init__(self, data: list[Data], graph: Data) -> None:
-        super(Dynamic_Dataloader, self).__init__()
-        self.data = data
-        self.graph = graph
-        self.num_classes = int(self.graph.y.max().item() + 1)
-        self.len = len(data)
-
-        self.num_nodes = self.graph.x.shape[0]
-        self.num_edges = self.graph.edge_index.shape[-1]
-        self.temporal = len(data)
-
-        self.temporal_event = None
-
-    def __getitem__(self, idx)-> Temporal_Dataloader:
-        return self.data[idx]
-    
-    def get_temporal(self) -> Union[Data|Temporal_Dataloader|None]:
-        if not self.temporal_event:
-            self.update_event()
-        return self.temporal_event
-    
-    def get_T1graph(self, timestamp: int) -> Union[Data|Temporal_Dataloader|None]:
-        if timestamp>=self.len-1:
-            return self.data[self.len-1]
-        if len(self.data) <= 1:
-            if self.data.is_empty(): return self.graph
-            return self.data[0]
-        return self.data[timestamp+1]
-
-    def update_event(self, timestamp: int = -1):
-        if timestamp>=self.len-1:
-            return
-        self.temporal_event = self.data[timestamp+1]
 
 
 class Temporal_Splitting(object):
-
-    class Label(enum.Enum):
-        c1 = 1
-        c2 = 2
-        c3 = 3
-
-    def __init__(self, graph: Data, dynamic: bool, idxloader: Any) -> None:
+    def __init__(self, graph: Data, dynamic: bool) -> None:
         
         super(Temporal_Splitting, self).__init__()
         self.graph = graph 
@@ -321,43 +90,9 @@ class Temporal_Splitting(object):
         if isinstance(self.graph.edge_attr, type(None)):
             self.graph.edge_attr = np.arange(self.graph.edge_index.size(1))
 
-        self.n_id = NodeIdxMatching(False, nodes=self.graph.x, label=self.graph.y)
         self.dynamic = dynamic
         self.temporal_list: list[Temporal_Dataloader] = []
-        if self.dynamic:
-            self.idxloader: dict[tuple, int] = idxloader
         self.set_mapping: dict = None
-        self.combination = label_match([1, 2, 3])
-    
-    @dispatch(int, bool)
-    def __getitem__(self, idx: int, is_node:bool = False):
-        if is_node:
-            return self.tracing_dict[idx]
-        return self.temporal_list[idx]
-    
-    @dispatch(int, int)
-    def __getitem__(self, list_idx: int, idx: int):
-        return self.temporal_list[list_idx][idx]
-
-    def get_map(self, set_input):
-        set_input_frozenset = frozenset(set_input)
-        return self.set_mapping.get(set_input_frozenset, None)
-
-    def set_map(self, c1, c2, c3):
-        set_mapping = {
-            frozenset(c1): self.Label.c1.value,
-            frozenset(c2): self.Label.c2.value,
-            frozenset(c3): self.Label.c3.value
-        }
-        self.set_mapping = set_mapping
-
-    def constrct_tracing_dict(self, temporal_list: list[Temporal_Dataloader]) -> None:
-        tracing_dict = {}
-        for idx, temporal in enumerate(temporal_list):
-            temporal_dict: dict[int: int] = temporal.up_report()
-            tracing_dict = {**tracing_dict, **{key: [val, idx] for key, val in temporal_dict.items()}}
-        self.tracing_dict = tracing_dict
-        return
 
     def sampling_layer(self, snapshots: int, views: int, span: float, strategy: str):
         T = []
@@ -399,29 +134,6 @@ class Temporal_Splitting(object):
             T.append(unique_time[-1].item())
         return T
 
-    def sampling_layer_by_time(self, span, duration: int = 30):
-        """
-        span :param; entire timestamp, expected in Unix timestamp such as 1254192988
-        duration: param; how many days
-        """
-        Times = [datetime.fromtimestamp(stamp).strftime("%Y-%m-%d") for stamp in span]
-        start_time = Times[0]
-
-        T_duration: list[int] = []
-
-        for idx, tim in enumerate(span):
-            if Times[idx] - start_time >=duration:
-                T_duration.append(tim)
-                start_time = Times[idx]
-        
-        return T_duration
-
-    def dict_transpose(self, input_dict):
-        my_list = []
-        for value in input_dict:
-            my_list.append(self.get_map(value))
-        return self.combination[tuple(my_list)]
-
     def temporal_splitting(self, snapshot, **kwargs) -> list[Data]:
         """
         currently only suitable for CLDG dataset, to present flexibilty of function Data\n
@@ -453,8 +165,8 @@ class Temporal_Splitting(object):
             sampled_edges = edge_index[:, sample_time]
             sampled_nodes = torch.unique(sampled_edges) if isinstance(sampled_edges, torch.Tensor) else np.unique(sampled_edges)
         
-            y = self.n_id.get_label_by_node(sampled_nodes)
-            subpos = pos[self.n_id.sample_idx(sampled_nodes)]
+            y = self.get_label_by_node(sampled_nodes)
+            subpos = pos[self.sample_idx(sampled_nodes)]
 
             # Zebra node classification will not refresh node idx...To maintain global node structure
             temporal_subgraph = Temporal_Dataloader(nodes=sampled_nodes, edge_index=sampled_edges, \
@@ -463,49 +175,6 @@ class Temporal_Splitting(object):
 
         return temporal_subgraphs
 
-"""
-TODO: get new function for robustness testing, few-shot learning, and imbalanced data checking
-if possible, add noise label checking
-"""
-def edge_robustness_disturb(data: Temporal_Dataloader, ratio: float)-> Optional[np.ndarray | Any]:
-    """
-    Specifically, for each graph 𝐺 (𝑉 , A, X), we randomly delete 𝛼 ||A||_0 existing edges by
-    varying a ratio 𝛼 ∈ {0.1, 0.2, 0.3, 0.4, 0.5}. 
-    """
-    if ratio>0.9:
-        raise ValueError("Too many edges be deleted, expected ratio less than 0.5 but get {:.4f}".format(ratio))
-    num_edges = data.edge_index.shape[1]
-    num_edges2delete = int(num_edges*ratio)
-    
-    # guaranteed all node is seen, in case of some node may totally been unseen
-    unique_nodes, unnique_idx = np.unique(data.edge_index, return_index=True)
-    edge_num = data.num_edges
-    non_flatten_mask = unnique_idx>=edge_num
-    unnique_idx[non_flatten_mask] = unnique_idx[non_flatten_mask] - edge_num
-    selected_edge_mask = np.ones(num_edges, dtype=bool)
-    selected_edge_mask[unnique_idx] = False
-    edge_able_to_remove = np.arange(edge_num)[selected_edge_mask]
-    
-    edges_idx2delete = np.random.choice(edge_able_to_remove, num_edges2delete, replace=False)
-    mask = np.ones(num_edges, dtype=bool)
-    mask[edges_idx2delete] = False
-    
-    retained_edge = data.edge_index[:, mask]
-    retained_tmp = data.edge_attr[mask]
-    
-    return retained_edge, retained_tmp
-
-def label_match(labels: list):
-    label_len = len(labels)
-
-    combination = {}
-    outer_ptr = 0
-    for ptr in range(1, label_len+1):
-        val = itertools.combinations(labels, ptr)
-        for v in val:
-            combination[v] = outer_ptr
-            outer_ptr += 1
-    return combination
 
 def position_encoding(max_len, emb_size)->torch.Tensor:
     pe = torch.zeros(max_len, emb_size)
@@ -523,28 +192,7 @@ def load_dblp_interact(path: str = None, dataset: str = "dblp", *wargs) -> pd.Da
 
     return edges, label
 
-def load_mathoverflow_interact(path: str = MATHOVERFLOW, *wargs) -> pd.DataFrame:
-    edges = pd.read_csv(os.path.join(path, "sx-mathoverflow"+".txt"), sep=' ', names=['src', 'dst', 'time'])
-    label = pd.read_csv(os.path.join(path, "node2label"+".txt"), sep=' ', names=['node', 'label'])
-    return edges, label
-
-def get_combination(labels: list[int]) -> dict:
-    """
-    :param labels: list of unique labels, for overflow it is fixed as [1,2,3]
-    :return: a dictionary that stores all possible combination of labels, usually is 6
-    """
-    unqiue_node = len(labels)
-
-    combination: dict = {}
-    outer_ptr = 0
-    for i in range(1, unqiue_node+1):
-        pairs = itertools.combinations(labels, i)
-        for pair in pairs:
-            combination[pair] = outer_ptr
-            outer_ptr += 1
-    return combination
-
-def load_static_overflow(prefix: str, path: str=None, *wargs) -> tuple[Data, NodeIdxMatching]:
+def load_static_overflow(prefix: str, path: str=None, *wargs) -> tuple[Data, pd.DataFrame]:
     dataset = "sx-"+prefix
     path = OVERFLOW + prefix + r"/static"
     edges = pd.read_csv(os.path.join(path, dataset+".txt"), sep=' ', names=['src', 'dst', 'time'])
@@ -575,20 +223,9 @@ def edge_load_mooc(dataset:str):
     if dataset == "mooc":
         node = np.unique(src2dst[0])
     node_pos = position_encoding(max_node, 64)# .numpy()
-    # edge_pos = time_encoding(timestamp)
-    
-    # pos = (node_pos, edge_pos)
+
     graph = Data(x = node, edge_index=src2dst, edge_attr=timestamp, y = y, pos = node_pos)
     return graph
-
-def load_dynamic_overflow(prefix: str, path: str=None, *wargs) -> tuple[pd.DataFrame, dict]:
-    dataset = prefix
-    path = OVERFLOW + prefix + r"/dynamic"
-    labels: list = [1,2,3]
-    edges = pd.read_csv(os.path.join(path, dataset+".txt"), sep=' ', names=['src', 'dst', 'time', 'appearance'])
-    combination_dict = get_combination(labels)
-    
-    return edges, combination_dict
 
 def dynamic_label(edges: pd.DataFrame, combination_dict: dict) -> pd.DataFrame:
     """
@@ -625,41 +262,23 @@ def get_dataset(path, name: str):
 
     return (CitationFull if name == 'dblp' else Planetoid)(osp.join(root_path, 'Citation'), name, transform=T.NormalizeFeatures())
 
-def load_standard(dataset: str, **wargs) -> tuple[Data, NodeIdxMatching]:
+def load_standard(dataset: str, **wargs) -> Data:
     
     path = osp.expanduser('~/datasets')
     path = osp.join(path, dataset)
     dataset = get_dataset(path, dataset)
     return dataset
 
-def load_tgb_series(name: str, emb_size: int = 64):
-    path = os.getcwd()
-    road = os.path.join(path, r"data/")
-
-    dataload = NodePropPredDataset(name=name, root = road, preprocess=True)
-    data = dataload.full_data
-    edges = np.vstack((data["sources"], data["destinations"])).astype(np.int16)
-    nodes = np.unique(edges).astype(np.int16)
-    train_mask, val_mask, test_mask = dataload.train_mask, dataload.val_mask, dataload.test_mask
-
-    pos = position_encoding(max_len=nodes.shape[0], emb_size=emb_size)
-
-    load_data = Temporal_Dataloader(nodes=nodes, edge_index=edges, edge_attr=data["timestamps"], y=data["edge_feat"], pos=pos)
-    load_data.mask_(train_mask, val_mask, test_mask)
-    return load_data, dataload
-
-def load_static_dataset(path: str = None, dataset: str = "mathoverflow", fea_dim: int = 64, **wargs) -> tuple[Temporal_Dataloader, NodeIdxMatching]:
+def load_static_dataset(path: str = None, dataset: str = "mathoverflow", fea_dim: int = 64, **wargs) -> Temporal_Dataloader:
     """
     Now this txt file only limited to loading data in from mathoverflow datasets
     path: (path, last three words of dataset) -> (str, str) e.g. ('data/mathoverflow/sx-mathoverflow-a2q.txt', 'a2q')
     node Idx of mathoverflow is not consistent!
     """
-    if dataset[-8:] == "overflow" or dataset == "askubuntu":
-        edges, label = load_static_overflow(dataset) if not path else load_static_overflow(dataset, path)
-    elif dataset == "dblp":
+    if dataset == "dblp":
         edges, label = load_dblp_interact() if not path else load_dblp_interact(path)
     elif dataset == "mooc":
-        return edge_load_mooc(dataset), None
+        return edge_load_mooc(dataset)
 
     x = label.node.to_numpy()
     nodes = position_encoding(x.max()+1, fea_dim)[x]
@@ -671,32 +290,10 @@ def load_static_dataset(path: str = None, dataset: str = "mathoverflow", fea_dim
     time = torch.tensor(edges.time)
 
     graph = Data(x=x, edge_index=edge_index, edge_attr=time, y=labels, pos = nodes)
-    # neighborloader = NeighborLoader(graph, num_neighbors=[10, 10], batch_size =2048, shuffle = False)
-    idxloader = NodeIdxMatching(False, nodes=x, label=labels)
-    return graph, idxloader
+    # neighborloader = NeighborLoader(graph, num_neighbors=[10, 10], batch_size =2048, shuffle = False
+    return graph
 
-def load_dynamic_dataset(dataset: str = "mathoverflow", fea_dim: int = 64, *wargs) -> tuple[Temporal_Dataloader, dict]:
-    """
-    Now this txt file only limited to loading data in from mathoverflow datasets
-    path: (path, last three words of dataset) -> (str, str) e.g. ('data/mathoverflow/sx-mathoverflow-a2q.txt', 'a2q')
-    node Idx of mathoverflow is not consistent!
-    """
-    edges, combination = load_dynamic_overflow(dataset)
-
-    x = torch.from_numpy(edges[["src", "dst"]].stack().unique()) # torch.Tensor
-    nodes = position_encoding(x.max()+1, fea_dim)[x] # torch.Tensor
-    labels = None
-
-    edge_index = torch.tensor(edges.loc[:, ["src", "dst"]].values.T) # torch.Tensor
-    start_time = edges.time.min()
-    edges.time = edges.time.apply(lambda x: x - start_time) # pd.DataFrame
-    time = torch.from_numpy(edges.time.values) # torch.Tensor
-    keep_tracer = edges
-
-    graph = Data(x=x, edge_index=edge_index, edge_attr=time, y=labels, pos = nodes, time=keep_tracer)
-    return graph, combination
-
-def load_padded_dataset(dataset: str = "tmall", fea_dim: int = 64, **wargs) -> tuple[Data, NodeIdxMatching]:
+def load_padded_dataset(dataset: str = "tmall", fea_dim: int = 64, **wargs) -> Data:
     """
     tmall and tax51 are large scale datasets, but its node label is not completed, so we use
     -1 to pad the node label, and use position encoding to generate node features
@@ -733,8 +330,7 @@ def load_padded_dataset(dataset: str = "tmall", fea_dim: int = 64, **wargs) -> t
     node_feature = position_encoding(max_node+1, fea_dim)
 
     graph = Data(x=full_x, edge_index=edge_index, edge_attr=time, y=full_labels, pos = node_feature)
-    idxloader = NodeIdxMatching(False, nodes=full_x, label=full_labels)
-    return graph, idxloader
+    return graph
 
 def load_tsv(path: list[tuple[str]], *wargs) -> tuple[pd.DataFrame]:
     """
@@ -750,11 +346,11 @@ def load_tsv(path: list[tuple[str]], *wargs) -> tuple[pd.DataFrame]:
 def load_example():
     return "node_feat", "node_label", "edge_index", "train_indices", "val_indices", "test_indices"
 
-def data_load(dataset: str, **wargs) -> tuple[Temporal_Dataloader, Union[NodeIdxMatching|dict]]:
+def data_load(dataset: str, **wargs) -> Temporal_Dataloader:
     dataset = dataset.lower()
     
     if dataset in STATIC:
-        graph, idxloader = load_static_dataset(dataset=dataset, **wargs)
+        graph = load_static_dataset(dataset=dataset, **wargs)
     elif dataset in ["cora", "citeseer", "wikics"] :
         graph = load_standard(dataset, **wargs)[0]
 
@@ -764,7 +360,6 @@ def data_load(dataset: str, **wargs) -> tuple[Temporal_Dataloader, Union[NodeIdx
         graph.edge_index = graph.edge_index.numpy()
         graph.edge_attr = np.arange(graph.edge_index.shape[1])
         graph.y = graph.y.numpy()
-        idxloader = NodeIdxMatching(False, nodes=nodes, label=graph.y)
     elif dataset in LARGE_SCALE:
         return load_padded_dataset(dataset=dataset, **wargs)
     else:
@@ -772,37 +367,6 @@ def data_load(dataset: str, **wargs) -> tuple[Temporal_Dataloader, Union[NodeIdx
     
     task: Optional[str|None] = wargs["rb_task"]
     if task != None: task = task.lower()
-    if task == "edge_disturb":
-        ratio = wargs["ratio"]
-        print(f"edge_disturb method will be activated for entire graph with {ratio}.")
-        graph.edge_index, graph.edge_attr = edge_robustness_disturb(graph, ratio)
-    if task == "imbalance":
-        print("Imbalanced method will be activated during each temporal data.")
-    if task == "fsl":
-        print("Few-shot Learning method will be activated during each temporal data.")
-    return graph, idxloader
-
-    
-def to_cuda(graph: Union[Data, Temporal_Dataloader], device:str = "cuda:0"):
-    device = torch.device(device)
-    if not isinstance(graph.x, torch.Tensor):
-        graph.x = torch.tensor(graph.x).to(device)
-    if not isinstance(graph.edge_index, torch.Tensor):
-        graph.edge_index = torch.tensor(graph.edge_index).to(device)
-    if not isinstance(graph.edge_attr, torch.Tensor):
-        graph.edge_attr = torch.tensor(graph.edge_attr).to(device)
-    if not isinstance(graph.y, torch.Tensor) or graph.y.device != device:
-        graph.y = torch.tensor(graph.y).to(device)
-    
-    pos_x_switch=True
-    try:
-        graph.pos = graph.pos.to(device)
-    except Exception as e:
-        pos_x_switch = False
-        pass
-    if pos_x_switch:
-        temp = graph.pos
-        graph.x = graph.pos
-        graph.pos = temp
-
     return graph
+
+    

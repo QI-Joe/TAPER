@@ -11,7 +11,7 @@ from model.kernels.joint_kernel import TDSLTPPRJointKernel
 
 
 class KernelFusion(TDSLTPPRJointKernel):
-    def __init__(self, fuse_mode, time_rff_dim=16, time_sigma=1.0, device='cpu'):
+    def __init__(self, fuse_mode, combine_mode,time_rff_dim=16, time_sigma=1.0, device='cpu'):
         """
         Initialize KernelFusion with proper parameter handling
         
@@ -31,9 +31,10 @@ class KernelFusion(TDSLTPPRJointKernel):
             device=device
         )
         self.fuse_mode = fuse_mode
+        self.combine_mode=combine_mode
         
 
-    def kernel_fuse(self, tppr_weights: Tensor, tdsl_weights: Tensor, timestamp, combine_mode, eps=1e-8):
+    def kernel_fuse(self, tppr_weights: Tensor, tdsl_weights: Tensor, timestamp, ablation: str, eps=1e-8):
         """
         Fuse TPPR and TDSL weights according to different strategies
         
@@ -65,19 +66,16 @@ class KernelFusion(TDSLTPPRJointKernel):
         
         else:
             raise ValueError(f"Unknown fusion mode: {self.fuse_mode}")
-            
-        if combine_mode == "full":
+        
+        if ablation=="tdsl":
+            fused = tdsl_weights
+        elif ablation=="tppr":
+            fused=tppr_weights
+        
+        if self.combine_mode == "full":
             fused = self.compute_joint_features(timestamp, fused)
         
-        # Row-wise normalization to maintain stochastic property
-        # row_sums = fused.sum(dim=1, keepdim=True)
-        # normalized_weights = torch.where(
-        #     row_sums > eps,
-        #     fused / row_sums,
-        #     torch.zeros_like(fused)
-        # )
-        
-        return fused
+        return torch.relu(fused)
 
 
 
